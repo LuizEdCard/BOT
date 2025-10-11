@@ -111,16 +111,16 @@ class GerenciadorBNB:
         # Calcular quantidade de BNB a comprar
         quantidade_bnb = self.valor_compra_bnb / preco_bnb
 
-        # Arredondar para 0.00001 (step size BNB)
-        quantidade_bnb = (quantidade_bnb * Decimal('100000')).quantize(
-            Decimal('1'), rounding='ROUND_DOWN'
-        ) / Decimal('100000')
+        # Arredondar para 0.001 (3 casas decimais - precisão aceita pela Binance)
+        quantidade_bnb = quantidade_bnb.quantize(
+            Decimal('0.001'), rounding='ROUND_DOWN'
+        )
 
-        # Verificar mínimo (0.00001 BNB)
-        if quantidade_bnb < Decimal('0.00001'):
+        # Verificar mínimo (0.001 BNB)
+        if quantidade_bnb < Decimal('0.001'):
             return {
                 'sucesso': False,
-                'mensagem': f'Quantidade BNB muito baixa: {quantidade_bnb:.5f}'
+                'mensagem': f'Quantidade BNB muito baixa: {quantidade_bnb:.3f} (mínimo: 0.001 BNB)'
             }
 
         try:
@@ -137,7 +137,7 @@ class GerenciadorBNB:
 
                 return {
                     'sucesso': True,
-                    'mensagem': f'Comprou {qtd_recebida:.5f} BNB por ${valor_gasto:.2f} USDT',
+                    'mensagem': f'Comprou {qtd_recebida:.3f} BNB por ${valor_gasto:.2f} USDT',
                     'quantidade_bnb': qtd_recebida,
                     'valor_usdt': valor_gasto,
                     'preco': preco_bnb,
@@ -188,7 +188,7 @@ class GerenciadorBNB:
 
             return {
                 'sucesso': True,
-                'mensagem': f'Saldo BNB suficiente: {saldo_bnb:.5f} BNB (≈ ${valor_bnb:.2f})',
+                'mensagem': f'Saldo BNB suficiente: {saldo_bnb:.3f} BNB (≈ ${valor_bnb:.2f})',
                 'precisa_comprar': False
             }
 

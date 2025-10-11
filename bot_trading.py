@@ -291,9 +291,16 @@ class TradingBot:
         quantidade_ada = Decimal(str(degrau['quantidade_ada']))
         valor_ordem = quantidade_ada * preco_atual
 
-        # Verificar se tem saldo suficiente
-        if valor_ordem > saldo_usdt:
-            logger.warning(f"⚠️ Saldo USDT insuficiente: ${saldo_usdt:.2f} < ${valor_ordem:.2f}")
+        # Calcular saldo utilizável (respeitando reserva de capital)
+        percentual_capital_ativo = Decimal(str(settings.PERCENTUAL_CAPITAL_ATIVO)) / Decimal('100')
+        saldo_utilizavel = saldo_usdt * percentual_capital_ativo
+
+        # Verificar se tem saldo suficiente (considerando a reserva)
+        if valor_ordem > saldo_utilizavel:
+            logger.warning(
+                f"⚠️ Saldo utilizável insuficiente: ${saldo_utilizavel:.2f} < ${valor_ordem:.2f} "
+                f"(Reserva de {settings.PERCENTUAL_RESERVA}% mantida: ${saldo_usdt - saldo_utilizavel:.2f})"
+            )
             return False
 
         # Verificar valor mínimo de ordem
