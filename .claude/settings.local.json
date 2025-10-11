@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir:*)",
+      "Bash(python3:*)",
+      "Bash(source:*)",
+      "Bash(pip install:*)",
+      "Bash(python:*)",
+      "Bash(tree:*)",
+      "Bash(cat:*)",
+      "Bash(chmod:*)",
+      "WebSearch",
+      "Bash(ln:*)",
+      "Bash(./start_background.sh:*)",
+      "Bash(./stop_bot.sh:*)",
+      "Bash(pip3 install:*)",
+      "Bash(pacman:*)",
+      "Bash(./restart_bot.sh:*)",
+      "Bash(sqlite3:*)",
+      "Bash(git add:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

@@ -1,0 +1,128 @@
+{
+  "versao": "1.0",
+  "data_atualizacao": "2025-10-10",
+  "descricao": "Estratégia de trading para acumulação de criptomoedas",
+
+  "pares_ativos": ["ADA/USDT"],
+
+  "degraus_compra": [
+    {
+      "nivel": 1,
+      "queda_percentual": 1.5,
+      "quantidade_ada": 8,
+      "valor_aproximado_usd": 6.50,
+      "intervalo_horas": 1.5,
+      "descricao": "Primeira oportunidade - queda leve"
+    },
+    {
+      "nivel": 2,
+      "queda_percentual": 3.0,
+      "quantidade_ada": 13,
+      "valor_aproximado_usd": 10.50,
+      "intervalo_horas": 2.0,
+      "descricao": "Segunda oportunidade - queda moderada"
+    },
+    {
+      "nivel": 3,
+      "queda_percentual": 5.5,
+      "quantidade_ada": 20,
+      "valor_aproximado_usd": 16.00,
+      "intervalo_horas": 3.0,
+      "descricao": "Terceira oportunidade - queda significativa"
+    },
+    {
+      "nivel": 4,
+      "queda_percentual": 8.5,
+      "quantidade_ada": 28,
+      "valor_aproximado_usd": 22.00,
+      "intervalo_horas": 4.0,
+      "descricao": "Quarta oportunidade - queda forte"
+    },
+    {
+      "nivel": 5,
+      "queda_percentual": 13.0,
+      "quantidade_ada": 38,
+      "valor_aproximado_usd": 30.00,
+      "intervalo_horas": 8.0,
+      "descricao": "Quinta oportunidade - queda muito forte"
+    },
+    {
+      "nivel": 6,
+      "queda_percentual": 19.0,
+      "quantidade_ada": 50,
+      "valor_aproximado_usd": 40.00,
+      "intervalo_horas": 12.0,
+      "descricao": "Sexta oportunidade - crash moderado"
+    },
+    {
+      "nivel": 7,
+      "queda_percentual": 26.0,
+      "quantidade_ada": 55,
+      "valor_aproximado_usd": 44.00,
+      "intervalo_horas": 24.0,
+      "descricao": "Sétima oportunidade - crash severo"
+    }
+  ],
+
+  "metas_venda": [
+    {
+      "meta": 1,
+      "lucro_percentual": 6,
+      "percentual_venda": 30,
+      "descricao": "Primeira realização - lucro moderado"
+    },
+    {
+      "meta": 2,
+      "lucro_percentual": 11,
+      "percentual_venda": 40,
+      "descricao": "Segunda realização - lucro bom"
+    },
+    {
+      "meta": 3,
+      "lucro_percentual": 18,
+      "percentual_venda": 30,
+      "descricao": "Terceira realização - lucro excelente"
+    }
+  ],
+
+  "limites_seguranca": {
+    "limite_gasto_diario": 100.00,
+    "percentual_capital_ativo": 92,
+    "percentual_reserva": 8,
+    "valor_minimo_ordem": 5.00,
+    "percentual_pausa_degraus_baixos": 80
+  },
+
+  "deteccao_picos": {
+    "janela_confirmacao_minutos": 120,
+    "janela_historico_horas": 48,
+    "tamanho_buffer_precos": 100
+  },
+
+  "volatilidade": {
+    "limite_alta_volatilidade": 8.0,
+    "reducao_intervalos_percentual": 50,
+    "queda_emergencial_percentual": 15.0,
+    "tempo_emergencial_horas": 2.0
+  },
+
+  "taxas": {
+    "binance_spot": 0.001,
+    "total_roundtrip": 0.002,
+    "descricao": "0.1% por operação (compra ou venda)"
+  },
+
+  "expansao_futura": {
+    "segundo_par": "XRP/USDT",
+    "capital_minimo_expansao": 300.00,
+    "ativo": false
+  },
+
+  "observacoes": [
+    "Intervalos reduzidos em 50% se volatilidade > 8%",
+    "Intervalos ignorados em caso de queda > 15% em < 2h",
+    "Sempre manter 8% de reserva de emergência",
+    "Preços de venda já incluem taxas (0.2% total)",
+    "Lucros 100% reinvestidos automaticamente"
+  ]
+}
