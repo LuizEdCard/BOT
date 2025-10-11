@@ -98,9 +98,69 @@ class TradingBot:
             else:
                 logger.info("📊 Nenhum estado anterior encontrado - iniciando do zero")
 
+            # Recuperar histórico de compras dos degraus (para cooldown)
+            self._recuperar_historico_degraus()
+
         except Exception as e:
             logger.error(f"⚠️ Erro ao recuperar estado do banco: {e}")
             logger.info("📊 Continuando com estado limpo")
+
+    def _recuperar_historico_degraus(self):
+        """
+        Recupera histórico de compras por degrau do banco de dados.
+        Isso evita compras repetidas no mesmo degrau após reinício.
+        """
+        try:
+            import sqlite3
+            from datetime import datetime, timedelta
+
+            conn = sqlite3.connect(str(settings.DATABASE_PATH))
+            cursor = conn.cursor()
+
+            # Buscar últimas compras por degrau nas últimas 24 horas
+            limite_tempo = datetime.now() - timedelta(hours=24)
+
+            cursor.execute("""
+                SELECT meta, MAX(data_hora) as ultima_compra
+                FROM ordens
+                WHERE tipo = 'COMPRA'
+                  AND meta LIKE 'degrau%'
+                  AND data_hora >= ?
+                GROUP BY meta
+            """, (limite_tempo.isoformat(),))
+
+            resultados = cursor.fetchall()
+
+            for meta, data_hora_str in resultados:
+                # Extrair número do degrau (ex: "degrau1" -> 1)
+                try:
+                    nivel_degrau = int(meta.replace('degrau', ''))
+                    data_hora = datetime.fromisoformat(data_hora_str)
+
+                    # Registrar no histórico
+                    self.historico_compras_degraus[nivel_degrau] = data_hora
+
+                    # Calcular tempo desde última compra
+                    tempo_decorrido = datetime.now() - data_hora
+                    horas = int(tempo_decorrido.total_seconds() / 3600)
+                    minutos = int((tempo_decorrido.total_seconds() % 3600) / 60)
+
+                    logger.info(f"   📌 Degrau {nivel_degrau}: última compra há {horas}h{minutos}m")
+
+                except (ValueError, AttributeError) as e:
+                    logger.debug(f"   ⚠️ Erro ao processar degrau {meta}: {e}")
+                    continue
+
+            conn.close()
+
+            if self.historico_compras_degraus:
+                logger.info(f"✅ Histórico de {len(self.historico_compras_degraus)} degraus recuperado")
+            else:
+                logger.info("📋 Nenhum histórico de degraus encontrado (primeiras compras)")
+
+        except Exception as e:
+            logger.error(f"⚠️ Erro ao recuperar histórico de degraus: {e}")
+            logger.info("📋 Continuando sem histórico de degraus")
 
     def importar_historico_binance(self, simbolo: str = 'ADAUSDT', limite: int = 500):
         """
