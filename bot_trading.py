@@ -121,11 +121,11 @@ class TradingBot:
             limite_tempo = datetime.now() - timedelta(hours=24)
 
             cursor.execute("""
-                SELECT meta, MAX(data_hora) as ultima_compra
+                SELECT meta, MAX(timestamp) as ultima_compra
                 FROM ordens
                 WHERE tipo = 'COMPRA'
                   AND meta LIKE 'degrau%'
-                  AND data_hora >= ?
+                  AND timestamp >= ?
                 GROUP BY meta
             """, (limite_tempo.isoformat(),))
 
