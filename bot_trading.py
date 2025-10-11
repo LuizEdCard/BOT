@@ -64,6 +64,7 @@ class TradingBot:
 
         # Controle de compras por degrau (para evitar compras repetidas)
         self.historico_compras_degraus: Dict[int, datetime] = {}  # {nivel_degrau: timestamp_ultima_compra}
+        self.contador_compras_degraus: Dict[int, int] = {}  # {nivel_degrau: total_compras}
 
         # Rastreamento de preço médio de compra (para calcular lucro)
         self.preco_medio_compra: Optional[Decimal] = None
@@ -109,6 +110,8 @@ class TradingBot:
         """
         Recupera histórico de compras por degrau do banco de dados.
         Isso evita compras repetidas no mesmo degrau após reinício.
+
+        LIMITE DE COMPRAS: Máximo 3 compras por degrau nas últimas 24h
         """
         try:
             import sqlite3
@@ -120,8 +123,12 @@ class TradingBot:
             # Buscar últimas compras por degrau nas últimas 24 horas
             limite_tempo = datetime.now() - timedelta(hours=24)
 
+            # Query 1: Buscar última compra e CONTAR total de compras por degrau
             cursor.execute("""
-                SELECT meta, MAX(timestamp) as ultima_compra
+                SELECT
+                    meta,
+                    MAX(timestamp) as ultima_compra,
+                    COUNT(*) as total_compras
                 FROM ordens
                 WHERE tipo = 'COMPRA'
                   AND meta LIKE 'degrau%'
@@ -131,21 +138,26 @@ class TradingBot:
 
             resultados = cursor.fetchall()
 
-            for meta, data_hora_str in resultados:
+            for meta, data_hora_str, total_compras in resultados:
                 # Extrair número do degrau (ex: "degrau1" -> 1)
                 try:
                     nivel_degrau = int(meta.replace('degrau', ''))
                     data_hora = datetime.fromisoformat(data_hora_str)
 
-                    # Registrar no histórico
+                    # Registrar timestamp da última compra
                     self.historico_compras_degraus[nivel_degrau] = data_hora
+
+                    # Registrar contador de compras
+                    self.contador_compras_degraus[nivel_degrau] = total_compras
 
                     # Calcular tempo desde última compra
                     tempo_decorrido = datetime.now() - data_hora
                     horas = int(tempo_decorrido.total_seconds() / 3600)
                     minutos = int((tempo_decorrido.total_seconds() % 3600) / 60)
 
-                    logger.info(f"   📌 Degrau {nivel_degrau}: última compra há {horas}h{minutos}m")
+                    # Log com informação do contador
+                    status = "🔴 BLOQUEADO" if total_compras >= 3 else f"✅ {3 - total_compras} restantes"
+                    logger.info(f"   📌 Degrau {nivel_degrau}: {total_compras}/3 compras ({status}) - última há {horas}h{minutos}m")
 
                 except (ValueError, AttributeError) as e:
                     logger.debug(f"   ⚠️ Erro ao processar degrau {meta}: {e}")
@@ -284,17 +296,29 @@ class TradingBot:
                 return degrau
         return None
 
-    def pode_comprar_degrau(self, nivel_degrau: int, cooldown_horas: int = 1) -> bool:
+    def pode_comprar_degrau(self, nivel_degrau: int, cooldown_horas: int = 1, max_compras: int = 3) -> bool:
         """
-        Verifica se pode comprar no degrau (cooldown)
+        Verifica se pode comprar no degrau (cooldown + limite de compras)
+
+        REGRA CRÍTICA: Máximo 3 compras por degrau nas últimas 24h
+        Após atingir o limite, o bot automaticamente tenta o próximo degrau
 
         Args:
             nivel_degrau: Nível do degrau (1, 2, 3, etc)
             cooldown_horas: Horas mínimas entre compras no mesmo degrau
+            max_compras: Número máximo de compras permitidas (padrão: 3)
 
         Returns:
             True se pode comprar, False caso contrário
         """
+        # VERIFICAÇÃO 1: Limite de compras (3 compras por degrau)
+        total_compras = self.contador_compras_degraus.get(nivel_degrau, 0)
+
+        if total_compras >= max_compras:
+            logger.warning(f"🚫 Degrau {nivel_degrau} BLOQUEADO: {total_compras}/{max_compras} compras atingidas (máx. nas últimas 24h)")
+            return False
+
+        # VERIFICAÇÃO 2: Cooldown entre compras
         if nivel_degrau not in self.historico_compras_degraus:
             return True  # Nunca comprou neste degrau
 
@@ -311,9 +335,24 @@ class TradingBot:
         return False
 
     def registrar_compra_degrau(self, nivel_degrau: int):
-        """Registra timestamp da compra no degrau"""
+        """
+        Registra timestamp da compra no degrau e incrementa contador
+
+        IMPORTANTE: Incrementa o contador de compras para limitar a 3 por degrau
+        """
+        # Atualizar timestamp da última compra
         self.historico_compras_degraus[nivel_degrau] = datetime.now()
-        logger.debug(f"✅ Compra registrada: Degrau {nivel_degrau} às {datetime.now().strftime('%H:%M:%S')}")
+
+        # Incrementar contador de compras
+        if nivel_degrau in self.contador_compras_degraus:
+            self.contador_compras_degraus[nivel_degrau] += 1
+        else:
+            self.contador_compras_degraus[nivel_degrau] = 1
+
+        total = self.contador_compras_degraus[nivel_degrau]
+        restantes = 3 - total
+
+        logger.info(f"✅ Compra #{total} registrada no degrau {nivel_degrau} ({restantes} compras restantes nas próximas 24h)")
 
     def atualizar_preco_medio_compra(self, quantidade: Decimal, preco: Decimal):
         """
@@ -660,26 +699,34 @@ class TradingBot:
                 # Obter saldos atuais
                 saldos = self.obter_saldos()
 
-                # LÓGICA DE COMPRA
+                # LÓGICA DE COMPRA (com fallback para próximos degraus)
                 if queda_pct and queda_pct > Decimal('0.5'):  # Só verificar se caiu pelo menos 0.5%
-                    degrau = self.encontrar_degrau_ativo(queda_pct)
+                    # Tentar comprar no degrau correspondente à queda atual
+                    # Se estiver bloqueado, tenta os degraus seguintes
+                    compra_executada = False
 
-                    if degrau:
-                        nivel_degrau = degrau['nivel']
+                    for degrau in settings.DEGRAUS_COMPRA:
+                        # Verificar se o degrau está ativo (queda suficiente)
+                        if queda_pct >= Decimal(str(degrau['queda_percentual'])):
+                            nivel_degrau = degrau['nivel']
 
-                        # Verificar cooldown do degrau
-                        if not self.pode_comprar_degrau(nivel_degrau, cooldown_horas=settings.COOLDOWN_DEGRAU_HORAS):
-                            # Em cooldown, pular esta compra
-                            pass
-                        else:
-                            logger.info(f"🎯 Degrau {nivel_degrau} ativado! Queda: {queda_pct:.2f}%")
+                            # Verificar se pode comprar (cooldown + limite de 3 compras)
+                            if self.pode_comprar_degrau(nivel_degrau, cooldown_horas=settings.COOLDOWN_DEGRAU_HORAS):
+                                logger.info(f"🎯 Degrau {nivel_degrau} ativado! Queda: {queda_pct:.2f}%")
 
-                            # Tentar executar compra
-                            if self.executar_compra(degrau, preco_atual, saldos['usdt']):
-                                logger.info("✅ Compra executada com sucesso!")
+                                # Tentar executar compra
+                                if self.executar_compra(degrau, preco_atual, saldos['usdt']):
+                                    logger.info("✅ Compra executada com sucesso!")
+                                    compra_executada = True
 
-                                # Aguardar 10 segundos após compra
-                                time.sleep(10)
+                                    # Aguardar 10 segundos após compra
+                                    time.sleep(10)
+                                    break  # Compra executada, sair do loop
+
+                            # Se não pode comprar neste degrau (bloqueado ou cooldown), tenta o próximo
+                            # O próximo degrau será verificado na próxima iteração do for
+
+                    # Se nenhum degrau permitiu compra, o bot continua operando normalmente
 
                 # LÓGICA DE VENDA (só vende com lucro!)
                 if self.preco_medio_compra and saldos['ada'] >= Decimal('1'):
