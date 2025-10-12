@@ -68,6 +68,13 @@ class TradingBot:
         self.historico_compras_degraus: Dict[int, datetime] = {}  # {nivel_degrau: timestamp_ultima_compra}
         self.contador_compras_degraus: Dict[int, int] = {}  # {nivel_degrau: total_compras}
 
+        # Controle de spam de logs (evita logar "Degrau X ativado" repetidamente)
+        self.ultima_tentativa_log_degrau: Dict[int, datetime] = {}  # {nivel_degrau: timestamp_ultimo_log}
+
+        # Estado operacional do bot
+        self.estado_bot: str = "OPERANDO"  # "OPERANDO" ou "AGUARDANDO_SALDO"
+        self.ja_avisou_sem_saldo: bool = False  # Evita avisar repetidamente
+
         # Rastreamento de preço médio de compra (para calcular lucro)
         self.preco_medio_compra: Optional[Decimal] = None
         self.quantidade_total_comprada: Decimal = Decimal('0')
@@ -568,7 +575,13 @@ class TradingBot:
                 self.quantidade_total_comprada -= quantidade_venda
                 self.valor_total_investido -= valor_medio_compra
 
-                logger.info(f"📊 Posição atualizada: {self.quantidade_total_comprada:.1f} ADA (preço médio: ${self.preco_medio_compra:.6f})")
+                # RECALCULAR PREÇO MÉDIO após ajustar valores
+                if self.quantidade_total_comprada > 0:
+                    self.preco_medio_compra = self.valor_total_investido / self.quantidade_total_comprada
+                    logger.info(f"📊 Posição atualizada: {self.quantidade_total_comprada:.1f} ADA (preço médio: ${self.preco_medio_compra:.6f})")
+                else:
+                    self.preco_medio_compra = None  # Zerou posição
+                    logger.info(f"📊 Posição zerada - todas as ADA vendidas!")
 
                 # Capturar saldos depois da venda
                 saldos_depois = self.obter_saldos()
@@ -701,8 +714,48 @@ class TradingBot:
                 # Obter saldos atuais
                 saldos = self.obter_saldos()
 
-                # LÓGICA DE COMPRA (com fallback para próximos degraus)
-                if queda_pct and queda_pct > Decimal('0.5'):  # Só verificar se caiu pelo menos 0.5%
+                # ═══════════════════════════════════════════════════════════════════
+                # VERIFICAÇÃO DE SALDO DISPONÍVEL (Modo "Aguardando Saldo")
+                # ═══════════════════════════════════════════════════════════════════
+                # Calcular saldo disponível considerando reserva
+                valor_posicao = self.quantidade_total_comprada * preco_atual if self.quantidade_total_comprada > 0 else Decimal('0')
+                capital_total = saldos['usdt'] + valor_posicao
+                reserva = capital_total * Decimal('0.08')
+                saldo_disponivel = saldos['usdt'] - reserva
+                valor_minimo_operar = Decimal('10.00')  # Mínimo para tentar compras
+
+                if saldo_disponivel < valor_minimo_operar:
+                    # SEM SALDO SUFICIENTE - Entrar em modo "Aguardando Saldo"
+                    if self.estado_bot != "AGUARDANDO_SALDO":
+                        self.estado_bot = "AGUARDANDO_SALDO"
+                        logger.warning("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                        logger.warning("⏸️  BOT EM MODO 'AGUARDANDO SALDO'")
+                        logger.warning("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                        logger.warning(f"   💰 Saldo disponível: ${saldo_disponivel:.2f}")
+                        logger.warning(f"   ⚠️  Mínimo necessário: ${valor_minimo_operar:.2f}")
+                        logger.warning(f"   🛡️  Reserva protegida: ${reserva:.2f}")
+                        logger.warning("")
+                        logger.warning("   📌 Bot pausou verificações de degraus")
+                        logger.warning("   📌 Aguardando venda ou novo aporte para retomar")
+                        logger.warning("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+                    # NÃO verificar degraus de compra - pular para lógica de venda
+                    # (Vendas ainda são permitidas para liberar saldo)
+                else:
+                    # TEM SALDO SUFICIENTE - Sair de modo "Aguardando Saldo" se estava nele
+                    if self.estado_bot == "AGUARDANDO_SALDO":
+                        self.estado_bot = "OPERANDO"
+                        logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                        logger.info("✅ SALDO RESTAURADO - Bot retomando operações")
+                        logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                        logger.info(f"   💰 Saldo disponível: ${saldo_disponivel:.2f}")
+                        logger.info(f"   🛡️  Reserva mantida: ${reserva:.2f}")
+                        logger.info("")
+                        logger.info("   ✅ Verificações de degraus reativadas")
+                        logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+                # LÓGICA DE COMPRA (só executa se estado == "OPERANDO")
+                if self.estado_bot == "OPERANDO" and queda_pct and queda_pct > Decimal('0.5'):  # Só verificar se caiu pelo menos 0.5%
                     # Tentar comprar no degrau correspondente à queda atual
                     # Se estiver bloqueado, tenta os degraus seguintes
                     compra_executada = False
@@ -714,7 +767,17 @@ class TradingBot:
 
                             # Verificar se pode comprar (cooldown + limite de 3 compras)
                             if self.pode_comprar_degrau(nivel_degrau, cooldown_horas=settings.COOLDOWN_DEGRAU_HORAS):
-                                logger.info(f"🎯 Degrau {nivel_degrau} ativado! Queda: {queda_pct:.2f}%")
+                                # ═══════════════════════════════════════════════════════
+                                # ANTI-SPAM: Só loga "Degrau X ativado" 1x a cada 5 minutos
+                                # ═══════════════════════════════════════════════════════
+                                agora = datetime.now()
+                                ultima_log = self.ultima_tentativa_log_degrau.get(nivel_degrau)
+
+                                # Se nunca logou OU passou mais de 5 minutos desde último log
+                                if ultima_log is None or (agora - ultima_log) >= timedelta(minutes=5):
+                                    logger.info(f"🎯 Degrau {nivel_degrau} ativado! Queda: {queda_pct:.2f}%")
+                                    # Atualizar timestamp do último log
+                                    self.ultima_tentativa_log_degrau[nivel_degrau] = agora
 
                                 # Tentar executar compra
                                 if self.executar_compra(degrau, preco_atual, saldos['usdt']):
