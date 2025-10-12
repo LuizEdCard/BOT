@@ -18,6 +18,7 @@ from src.comunicacao.api_manager import APIManager
 from src.core.gerenciador_aportes import GerenciadorAportes
 from src.core.gerenciador_bnb import GerenciadorBNB
 from src.core.analise_tecnica import AnaliseTecnica
+from src.core.gestao_capital import GestaoCapital
 from src.persistencia.database import DatabaseManager
 from src.utils.logger import get_logger
 
@@ -43,6 +44,7 @@ class TradingBot:
         self.gerenciador_aportes = GerenciadorAportes(self.api, settings)
         self.gerenciador_bnb = GerenciadorBNB(self.api, settings)
         self.analise_tecnica = AnaliseTecnica(self.api)
+        self.gestao_capital = GestaoCapital()  # Gestor de capital com validação de reserva
 
         # Banco de dados
         self.db = DatabaseManager(
@@ -386,20 +388,20 @@ class TradingBot:
         return lucro_pct
 
     def executar_compra(self, degrau: Dict, preco_atual: Decimal, saldo_usdt: Decimal):
-        """Executa compra no degrau"""
+        """Executa compra no degrau com validação rigorosa de reserva"""
         quantidade_ada = Decimal(str(degrau['quantidade_ada']))
         valor_ordem = quantidade_ada * preco_atual
 
-        # Calcular saldo utilizável (respeitando reserva de capital)
-        percentual_capital_ativo = Decimal(str(settings.PERCENTUAL_CAPITAL_ATIVO)) / Decimal('100')
-        saldo_utilizavel = saldo_usdt * percentual_capital_ativo
+        # VALIDAÇÃO RIGOROSA DE SALDO E RESERVA
+        # Atualizar saldos no gestor de capital
+        valor_posicao_ada = self.quantidade_total_comprada * preco_atual if self.quantidade_total_comprada > 0 else Decimal('0')
+        self.gestao_capital.atualizar_saldos(saldo_usdt, valor_posicao_ada)
 
-        # Verificar se tem saldo suficiente (considerando a reserva)
-        if valor_ordem > saldo_utilizavel:
-            logger.warning(
-                f"⚠️ Saldo utilizável insuficiente: ${saldo_utilizavel:.2f} < ${valor_ordem:.2f} "
-                f"(Reserva de {settings.PERCENTUAL_RESERVA}% mantida: ${saldo_usdt - saldo_utilizavel:.2f})"
-            )
+        # Verificar se pode comprar (valida reserva + saldo mínimo)
+        pode, motivo = self.gestao_capital.pode_comprar(valor_ordem)
+
+        if not pode:
+            logger.warning(f"⚠️ {motivo}")
             return False
 
         # Verificar valor mínimo de ordem
