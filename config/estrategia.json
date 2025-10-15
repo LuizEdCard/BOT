@@ -1,9 +1,13 @@
 {
-  "versao": "1.0",
-  "data_atualizacao": "2025-10-10",
+  "versao": "1.1",
+  "data_atualizacao": "2025-10-15",
   "descricao": "Estratégia de trading para acumulação de criptomoedas",
 
   "pares_ativos": ["ADA/USDT"],
+
+  "cooldown_global_apos_compra_minutos": 30,
+
+  "percentual_minimo_melhora_pm": 2.0,
 
   "degraus_compra": [
     {
@@ -85,6 +89,49 @@
     }
   ],
 
+  "vendas_de_seguranca": [
+    {
+      "nome": "Seguranca_Pre-Meta1-A",
+      "gatilho_ativacao_lucro_pct": 4.5,
+      "gatilho_venda_reversao_pct": 0.8,
+      "percentual_venda_posicao": 10,
+      "gatilho_recompra_drop_pct": 2.0,
+      "descricao": "Venda de segurança A antes da meta 1 (6%) - Ativa em 4.5%, vende se cair 0.8%"
+    },
+    {
+      "nome": "Seguranca_Pre-Meta1-B",
+      "gatilho_ativacao_lucro_pct": 5.5,
+      "gatilho_venda_reversao_pct": 1.0,
+      "percentual_venda_posicao": 10,
+      "gatilho_recompra_drop_pct": 2.0,
+      "descricao": "Venda de segurança B antes da meta 1 (6%) - Ativa em 5.5%, vende se cair 1.0%"
+    },
+    {
+      "nome": "Seguranca_Pre-Meta2-A",
+      "gatilho_ativacao_lucro_pct": 8.5,
+      "gatilho_venda_reversao_pct": 1.2,
+      "percentual_venda_posicao": 15,
+      "gatilho_recompra_drop_pct": 2.5,
+      "descricao": "Venda de segurança A antes da meta 2 (11%) - Ativa em 8.5%, vende se cair 1.2%"
+    },
+    {
+      "nome": "Seguranca_Pre-Meta2-B",
+      "gatilho_ativacao_lucro_pct": 10.0,
+      "gatilho_venda_reversao_pct": 1.5,
+      "percentual_venda_posicao": 15,
+      "gatilho_recompra_drop_pct": 2.5,
+      "descricao": "Venda de segurança B antes da meta 2 (11%) - Ativa em 10.0%, vende se cair 1.5%"
+    },
+    {
+      "nome": "Seguranca_Pre-Meta3",
+      "gatilho_ativacao_lucro_pct": 15.0,
+      "gatilho_venda_reversao_pct": 2.0,
+      "percentual_venda_posicao": 20,
+      "gatilho_recompra_drop_pct": 3.0,
+      "descricao": "Venda de segurança antes da meta 3 (18%) - Ativa em 15.0%, vende se cair 2.0%"
+    }
+  ],
+
   "limites_seguranca": {
     "limite_gasto_diario": 100.00,
     "percentual_capital_ativo": 92,
@@ -124,5 +171,20 @@
     "Sempre manter 8% de reserva de emergência",
     "Preços de venda já incluem taxas (0.2% total)",
     "Lucros 100% reinvestidos automaticamente"
-  ]
+  ],
+
+  "aportes": {
+    "intervalo_verificacao_minutos": 30,
+    "valor_minimo_brl_para_converter": 50.0
+  },
+
+  "gestao_de_risco": {
+    "exposicao_maxima_percentual_capital": 70.0,
+    "reativar_compras_apos_venda": true,
+    "compras_de_oportunidade_extrema": [
+      { "preco_alvo": 0.65, "percentual_capital_usar": 30 },
+      { "preco_alvo": 0.60, "percentual_capital_usar": 20 },
+      { "preco_alvo": 0.55, "percentual_capital_usar": 50 }
+    ]
+  }
 }

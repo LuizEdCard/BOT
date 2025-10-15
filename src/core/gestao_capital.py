@@ -18,9 +18,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from config.settings import settings
 from src.utils.logger import get_logger
 
+# Logger usa configuração padrão (não precisa especificar nível)
 logger = get_logger(
     log_dir=Path('logs'),
-    nivel=settings.LOG_LEVEL,
     console=True
 )
 
@@ -87,6 +87,15 @@ class GestaoCapital:
         """
         reserva = self.calcular_reserva_obrigatoria()
         return self.saldo_usdt - reserva
+
+    def get_alocacao_percentual_ada(self) -> Decimal:
+        """Calcula o percentual do capital total que está alocado em ADA."""
+        capital_total = self.calcular_capital_total()
+        if capital_total <= 0:
+            return Decimal('0')
+
+        # self.valor_posicao_ada é o valor da posição ADA em USDT
+        return (self.valor_posicao_ada / capital_total) * Decimal('100')
 
     def pode_comprar(self, valor_operacao: Decimal) -> Tuple[bool, str]:
         """

@@ -1,23 +1,21 @@
 {
   "permissions": {
     "allow": [
-      "Bash(mkdir:*)",
+      "Bash(bash:*)",
+      "Bash(python -m py_compile:*)",
       "Bash(python3:*)",
-      "Bash(source:*)",
-      "Bash(pip install:*)",
-      "Bash(python:*)",
-      "Bash(tree:*)",
-      "Bash(cat:*)",
+      "Bash(ps:*)",
       "Bash(chmod:*)",
-      "WebSearch",
-      "Bash(ln:*)",
-      "Bash(./start_background.sh:*)",
-      "Bash(./stop_bot.sh:*)",
-      "Bash(pip3 install:*)",
-      "Bash(pacman:*)",
-      "Bash(./restart_bot.sh:*)",
-      "Bash(sqlite3:*)",
-      "Bash(git add:*)"
+      "Read(///**)",
+      "Bash(find:*)",
+      "Bash(for file in testar_painel_status.py testar_context_manager.py)",
+      "Bash(do)",
+      "Bash(if [ -f \"$file\" ])",
+      "Bash(then)",
+      "Bash(echo \"✅ $file atualizado\")",
+      "Bash(fi)",
+      "Bash(done)",
+      "Bash(python:*)"
     ],
     "deny": [],
     "ask": []

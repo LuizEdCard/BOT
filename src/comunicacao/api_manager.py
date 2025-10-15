@@ -179,14 +179,23 @@ class APIManager:
             Dados da ordem executada ou None se falhou
         """
         try:
+            # Formatar quantidade corretamente para ADAUSDT (step size = 0.1)
+            # Binance rejeita se não for múltiplo exato de stepSize
+            if simbolo.upper() == 'ADAUSDT':
+                # Formatar com 1 casa decimal (0.1 é o stepSize de ADA)
+                quantidade_formatada = f"{quantidade:.1f}"
+            else:
+                # Para outros pares, usar formatação padrão
+                quantidade_formatada = str(quantidade)
+
             params = {
                 'symbol': simbolo.upper(),
                 'side': lado.upper(),
                 'type': 'MARKET',
-                'quantity': quantidade
+                'quantity': quantidade_formatada
             }
 
-            logger.info(f"📤 Criando ordem: {lado} {quantidade} {simbolo}")
+            logger.info(f"📤 Criando ordem: {lado} {quantidade_formatada} {simbolo}")
 
             resposta = self._fazer_requisicao(
                 'POST',

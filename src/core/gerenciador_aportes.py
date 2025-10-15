@@ -30,7 +30,7 @@ class GerenciadorAportes:
         """
         self.api = api_manager
         self.settings = settings
-        self.valor_minimo_aporte = Decimal(str(settings.VALOR_MINIMO_APORTE))
+        self.aportes_config = settings.APORTES
 
     def verificar_saldo_brl(self) -> Decimal:
         """
@@ -137,14 +137,15 @@ class GerenciadorAportes:
             }
         """
         try:
-            # 1. Verificar saldo BRL
             saldo_brl = self.verificar_saldo_brl()
 
-            if saldo_brl < self.valor_minimo_aporte:
+            valor_minimo_brl = Decimal(str(self.aportes_config['valor_minimo_brl_para_converter']))
+
+            if saldo_brl < valor_minimo_brl:
                 return {
                     'sucesso': False,
                     'valor_brl': saldo_brl,
-                    'mensagem': f"Saldo BRL insuficiente: R$ {saldo_brl:.2f} (mínimo: R$ {self.valor_minimo_aporte:.2f})"
+                    'mensagem': f"Saldo BRL insuficiente: R$ {saldo_brl:.2f} (mínimo: R$ {valor_minimo_brl:.2f})"
                 }
 
             # 2. Definir valor a converter
@@ -227,8 +228,9 @@ class GerenciadorAportes:
         logger.info("🔍 Verificando aportes em BRL...")
 
         saldo_brl = self.verificar_saldo_brl()
+        valor_minimo_brl = Decimal(str(self.aportes_config['valor_minimo_brl_para_converter']))
 
-        if saldo_brl >= self.valor_minimo_aporte:
+        if saldo_brl >= valor_minimo_brl:
             logger.info(f"💰 Aporte detectado: R$ {saldo_brl:.2f}")
             logger.info("🔄 Iniciando conversão automática BRL → USDT...")
 

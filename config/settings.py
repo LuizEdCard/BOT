@@ -93,6 +93,27 @@ class Settings:
         self.METAS_VENDA = self.estrategia['metas_venda']
 
         # ═══════════════════════════════════════════════════════════
+        # VENDAS DE SEGURANÇA (Estratégia Avançada)
+        # ═══════════════════════════════════════════════════════════
+        self.VENDAS_DE_SEGURANCA = self.estrategia.get('vendas_de_seguranca', [])
+
+        # ═══════════════════════════════════════════════════════════
+        # APORTES BRL (Verificação Periódica)
+        # ═══════════════════════════════════════════════════════════
+        self.APORTES = self.estrategia.get('aportes', {
+            'intervalo_verificacao_minutos': 30,
+            'valor_minimo_brl_para_converter': 50.0
+        })
+
+        # ═══════════════════════════════════════════════════════════
+        # GESTÃO DE RISCO (Guardião Estratégico)
+        # ═══════════════════════════════════════════════════════════
+        self.GESTAO_DE_RISCO = self.estrategia.get('gestao_de_risco', {})
+        self.GESTAO_DE_RISCO.setdefault('exposicao_maxima_percentual_capital', 70.0)
+        self.GESTAO_DE_RISCO.setdefault('reativar_compras_apos_venda', True)
+        self.GESTAO_DE_RISCO.setdefault('compras_de_oportunidade_extrema', [])
+
+        # ═══════════════════════════════════════════════════════════
         # TAXAS
         # ═══════════════════════════════════════════════════════════
         self.TAXA_BINANCE = Decimal(str(self.estrategia['taxas']['binance_spot']))
@@ -129,10 +150,18 @@ class Settings:
         self.INTERVALO_VERIFICACAO_SALDO = int(os.getenv('INTERVALO_VERIFICACAO_SALDO', '3600'))
 
         # ═══════════════════════════════════════════════════════════
-        # CONTROLE DE COMPRAS
+        # CONTROLE DE COMPRAS - COOLDOWN DUPLO + DCA INTELIGENTE
         # ═══════════════════════════════════════════════════════════
-        # Cooldown em horas entre compras no mesmo degrau (evita compras repetidas)
-        self.COOLDOWN_DEGRAU_HORAS = int(os.getenv('COOLDOWN_DEGRAU_HORAS', '1'))
+        # NOVO SISTEMA: Cooldown global após qualquer compra (minutos)
+        self.COOLDOWN_GLOBAL_APOS_COMPRA_MINUTOS = int(
+            self.estrategia.get('cooldown_global_apos_compra_minutos', 30)
+        )
+
+        # DCA INTELIGENTE: Percentual mínimo de melhora do preço médio para comprar
+        # Ex: 2.0 = só compra se preço atual for 2% menor que preço médio
+        self.PERCENTUAL_MINIMO_MELHORA_PM = Decimal(
+            str(self.estrategia.get('percentual_minimo_melhora_pm', 2.0))
+        )
 
         # ═══════════════════════════════════════════════════════════
         # NOTIFICAÇÕES (FUTURO)
