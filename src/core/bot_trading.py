@@ -11,10 +11,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 import time
 from decimal import Decimal
 from datetime import datetime, timedelta
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 
-from config.settings import settings
-from src.comunicacao.api_manager import APIManager
+from config.settings import settings # Keep for main() instantiation for now
+from src.exchange.base import ExchangeAPI
+from src.exchange.binance_api import BinanceAPI # For instantiation in main()
 from src.core.gerenciador_aportes import GerenciadorAportes
 from src.core.gerenciador_bnb import GerenciadorBNB
 from src.core.analise_tecnica import AnaliseTecnica
@@ -28,32 +29,31 @@ from src.utils.constants import Icones, LogConfig
 class TradingBot:
     """Bot de Trading ADA/USDT"""
 
-    def __init__(self):
+    def __init__(self, config: Dict[str, Any], exchange_api: ExchangeAPI):
         """Inicializar bot"""
+        self.config = config
+        self.exchange_api = exchange_api
+
         self.logger, self.panel_logger = get_loggers(
+            nome=self.config.get('BOT_NAME', 'TradingBot'),
             log_dir=Path('logs'),
             config=LogConfig.DEFAULT,
             console=True
         )
-        self.api = APIManager(
-            api_key=settings.BINANCE_API_KEY,
-            api_secret=settings.BINANCE_API_SECRET,
-            base_url=settings.BINANCE_API_URL
-        )
 
-        self.gerenciador_aportes = GerenciadorAportes(self.api, settings)
-        self.gerenciador_bnb = GerenciadorBNB(self.api, settings)
-        self.analise_tecnica = AnaliseTecnica(self.api)
+        self.gerenciador_aportes = GerenciadorAportes(self.exchange_api, self.config)
+        self.gerenciador_bnb = GerenciadorBNB(self.exchange_api, self.config)
+        self.analise_tecnica = AnaliseTecnica(self.exchange_api)
         self.gestao_capital = GestaoCapital()  # Gestor de capital com validação de reserva
 
         # Banco de dados (somente para ordens e histórico)
         self.db = DatabaseManager(
-            db_path=settings.DATABASE_PATH,
-            backup_dir=settings.BACKUP_DIR
+            db_path=self.config['DATABASE_PATH'],
+            backup_dir=self.config['BACKUP_DIR']
         )
 
         # Gerenciador de estado operacional (cooldowns, timestamps)
-        self.state = StateManager(state_file_path='dados/bot_state.json')
+        self.state = StateManager(state_file_path=self.config['STATE_FILE_PATH'])
 
         # Estado do bot
         self.sma_referencia: Optional[Decimal] = None  # SMA de 4 semanas como referência
@@ -65,7 +65,7 @@ class TradingBot:
         self.inicio_bot = datetime.now()  # Timestamp de início para calcular uptime
 
         # Controle de verificação de aportes BRL
-        self.aportes_config = settings.APORTES
+        self.aportes_config = self.config['APORTES']
         self.intervalo_verificacao_aportes = timedelta(minutes=self.aportes_config['intervalo_verificacao_minutos'])
         self.ultima_verificacao_aportes = datetime.now() - self.intervalo_verificacao_aportes
 
@@ -153,9 +153,15 @@ class TradingBot:
             self.logger.info("🔄 Sincronizando saldos com a Binance...")
 
             # Buscar saldo real da API Binance
-            saldos_binance = self.obter_saldos()
-            saldo_ada_real = saldos_binance['ada']
-            saldo_usdt_real = saldos_binance['usdt']
+            saldos_binance_raw = self.exchange_api.get_info_conta() # Use get_info_conta
+            # Parse saldos_binance_raw to get ADA and USDT free balances
+            saldo_ada_real = Decimal('0')
+            saldo_usdt_real = Decimal('0')
+            for balance_entry in saldos_binance_raw.get('balances', []):
+                if balance_entry['asset'] == 'ADA':
+                    saldo_ada_real = Decimal(str(balance_entry['free']))
+                elif balance_entry['asset'] == 'USDT':
+                    saldo_usdt_real = Decimal(str(balance_entry['free']))
 
             # Comparar com estado local
             saldo_ada_local = self.quantidade_total_comprada
@@ -230,7 +236,7 @@ class TradingBot:
 
         except Exception as e:
             self.logger.error(f"⚠️ Erro ao recuperar timestamp da última compra: {e}")
-            self.logger.info("📋Continuando sem histórico")
+            self.logger.info("📋Continuing sem histórico")
 
     def importar_historico_binance(self, simbolo: str = 'ADAUSDT', limite: int = 500):
         """
@@ -247,7 +253,7 @@ class TradingBot:
             self.logger.info(f"📥 Importando histórico de ordens da Binance ({simbolo})...")
 
             # Buscar ordens da Binance
-            ordens = self.api.obter_historico_ordens(simbolo=simbolo, limite=limite)
+            ordens = self.exchange_api.get_historico_ordens(par=simbolo, limite=limite) # Use new method
 
             if not ordens:
                 self.logger.info("📭 Nenhuma ordem encontrada no histórico da Binance")
@@ -274,14 +280,16 @@ class TradingBot:
             return {'importadas': 0, 'duplicadas': 0, 'erros': 1}
 
     def obter_preco_atual(self) -> Optional[Decimal]:
-        """Obtém preço atual de ADA/USDT"""
+        """
+        Obtém preço atual de ADA/USDT
+        """
         try:
-            ticker = self.api.obter_ticker('ADAUSDT')
-            preco = Decimal(str(ticker['price']))
+            # Use new exchange_api method
+            preco = Decimal(str(self.exchange_api.get_preco_atual(self.config['PAR_PRINCIPAL'])))
 
             # Adicionar ao histórico
             self.historico_precos.append(preco)
-            if len(self.historico_precos) > settings.TAMANHO_BUFFER_PRECOS:
+            if len(self.historico_precos) > self.config['TAMANHO_BUFFER_PRECOS']:
                 self.historico_precos.pop(0)
 
             return preco
@@ -290,18 +298,21 @@ class TradingBot:
             return None
 
     def obter_saldos(self) -> Dict:
-        """Obtém saldos de USDT e ADA"""
+        """
+        Obtém saldos de USDT e ADA
+        """
         try:
-            saldos_raw = self.api.obter_saldos()
+            # Use new exchange_api method
+            saldos_raw = self.exchange_api.get_info_conta()
 
             saldo_usdt = Decimal('0')
             saldo_ada = Decimal('0')
 
-            for saldo in saldos_raw:
-                if saldo['asset'] == 'USDT':
-                    saldo_usdt = Decimal(str(saldo['free']))
-                elif saldo['asset'] == 'ADA':
-                    saldo_ada = Decimal(str(saldo['free']))
+            for saldo in saldos_raw.get('balances', []):
+                if saldo['currency'] == 'USDT':
+                    saldo_usdt = Decimal(str(saldo['available']))
+                elif saldo['currency'] == 'ADA':
+                    saldo_ada = Decimal(str(saldo['available']))
 
             return {
                 'usdt': saldo_usdt,
@@ -325,7 +336,7 @@ class TradingBot:
             self.logger.info("🔄 Atualizando SMA de referência (4 semanas)...")
 
             smas = self.analise_tecnica.calcular_sma_multiplos_timeframes(
-                simbolo='ADAUSDT',
+                simbolo=self.config['PAR_PRINCIPAL'],
                 periodo_dias=28  # 4 semanas
             )
 
@@ -340,7 +351,9 @@ class TradingBot:
                 self.logger.error("❌ Não foi possível atualizar SMA")
 
     def calcular_queda_percentual(self, preco_atual: Decimal) -> Optional[Decimal]:
-        """Calcula queda % desde a SMA de referência"""
+        """
+        Calcula queda % desde a SMA de referência
+        """
         if self.sma_referencia is None:
             return None
 
@@ -348,8 +361,10 @@ class TradingBot:
         return queda
 
     def encontrar_degrau_ativo(self, queda_pct: Decimal) -> Optional[Dict]:
-        """Encontra degrau de compra correspondente"""
-        for degrau in settings.DEGRAUS_COMPRA:
+        """
+        Encontra degrau de compra correspondente
+        """
+        for degrau in self.config['DEGRAUS_COMPRA']:
             if queda_pct >= Decimal(str(degrau['queda_percentual'])):
                 return degrau
         return None
@@ -369,7 +384,7 @@ class TradingBot:
         """
         degrau_mais_profundo = None
 
-        for degrau in settings.DEGRAUS_COMPRA:
+        for degrau in self.config['DEGRAUS_COMPRA']:
             if queda_pct >= Decimal(str(degrau['queda_percentual'])):
                 # Como os degraus estão ordenados por queda crescente,
                 # o último que passar na verificação é o mais profundo
@@ -395,7 +410,7 @@ class TradingBot:
         agora = datetime.now()
 
         # VERIFICAÇÃO 1: COOLDOWN GLOBAL (após qualquer compra)
-        cooldown_global_minutos = settings.COOLDOWN_GLOBAL_APOS_COMPRA_MINUTOS
+        cooldown_global_minutos = self.config['COOLDOWN_GLOBAL_APOS_COMPRA_MINUTOS']
 
         timestamp_global_str = self.state.get_state('ultima_compra_global_ts')
         if timestamp_global_str:
@@ -443,7 +458,7 @@ class TradingBot:
 
         # Registrar cooldown global
         self.state.set_state('ultima_compra_global_ts', timestamp_iso)
-        self.logger.debug(f"🕒 Cooldown global ativado: {settings.COOLDOWN_GLOBAL_APOS_COMPRA_MINUTOS} minutos")
+        self.logger.debug(f"🕒 Cooldown global ativado: {self.config['COOLDOWN_GLOBAL_APOS_COMPRA_MINUTOS']} minutos")
 
         # Registrar cooldown por degrau (se especificado)
         if nivel_degrau is not None:
@@ -483,7 +498,9 @@ class TradingBot:
         return lucro_pct
 
     def executar_compra(self, degrau: Dict, preco_atual: Decimal, saldo_usdt: Decimal):
-        """Executa compra no degrau com validação rigorosa de reserva"""
+        """
+        Executa compra no degrau com validação rigorosa de reserva
+        """
         quantidade_ada = Decimal(str(degrau['quantidade_ada']))
         valor_ordem = quantidade_ada * preco_atual
 
@@ -501,7 +518,7 @@ class TradingBot:
             return False
 
         # Verificar valor mínimo de ordem
-        if valor_ordem < settings.VALOR_MINIMO_ORDEM:
+        if valor_ordem < self.config['VALOR_MINIMO_ORDEM']:
             self.logger.warning(f"⚠️ Valor de ordem abaixo do mínimo: ${valor_ordem:.2f}")
             return False
 
@@ -511,15 +528,14 @@ class TradingBot:
             preco_medio_antes = self.preco_medio_compra
 
             # Criar ordem de compra
-            ordem = self.api.criar_ordem_mercado(
-                simbolo='ADAUSDT',
-                lado='BUY',
+            ordem = self.exchange_api.place_ordem_compra_market(
+                par=self.config['PAR_PRINCIPAL'],
                 quantidade=float(quantidade_ada)
             )
 
             if ordem and ordem.get('status') == 'FILLED':
                 self.logger.operacao_compra(
-                    par='ADA/USDT',
+                    par=self.config['PAR_PRINCIPAL'],
                     quantidade=float(quantidade_ada),
                     preco=float(preco_atual),
                     degrau=degrau['nivel'],
@@ -538,7 +554,7 @@ class TradingBot:
                 # SALVAR NO BANCO DE DADOS
                 self.db.registrar_ordem({
                     'tipo': 'COMPRA',
-                    'par': 'ADA/USDT',
+                    'par': self.config['PAR_PRINCIPAL'],
                     'quantidade': quantidade_ada,
                     'preco': preco_atual,
                     'valor_total': valor_ordem,
@@ -570,7 +586,9 @@ class TradingBot:
             return False
 
     def executar_compra_por_valor(self, valor_usdt: Decimal, motivo: str) -> bool:
-        """Executa uma compra baseada em um valor em USDT."""
+        """
+        Executa uma compra baseada em um valor em USDT.
+        """
         preco_atual = self.obter_preco_atual()
         if not preco_atual:
             self.logger.error("❌ Não foi possível obter o preço atual para a compra por valor.")
@@ -580,7 +598,7 @@ class TradingBot:
         quantidade_ada = valor_usdt / preco_atual
 
         # Validação de valor mínimo da ordem
-        if valor_usdt < settings.VALOR_MINIMO_ORDEM:
+        if valor_usdt < self.config['VALOR_MINIMO_ORDEM']:
             self.logger.warning(f"⚠️ Valor de ordem abaixo do mínimo: ${valor_usdt:.2f}")
             return False
 
@@ -588,9 +606,8 @@ class TradingBot:
             saldos_antes = self.obter_saldos()
             preco_medio_antes = self.preco_medio_compra
 
-            ordem = self.api.criar_ordem_mercado(
-                simbolo='ADAUSDT',
-                lado='BUY',
+            ordem = self.exchange_api.place_ordem_compra_market(
+                par=self.config['PAR_PRINCIPAL'],
                 quantidade=float(quantidade_ada)
             )
 
@@ -599,7 +616,7 @@ class TradingBot:
                 valor_real = Decimal(str(ordem.get('cummulativeQuoteQty', '0')))
 
                 self.logger.operacao_compra(
-                    par='ADA/USDT',
+                    par=self.config['PAR_PRINCIPAL'],
                     quantidade=float(quantidade_real),
                     preco=float(preco_atual),
                     degrau=motivo.replace(" ", "_"),
@@ -613,7 +630,7 @@ class TradingBot:
 
                 self.db.registrar_ordem({
                     'tipo': 'COMPRA',
-                    'par': 'ADA/USDT',
+                    'par': self.config['PAR_PRINCIPAL'],
                     'quantidade': quantidade_real,
                     'preco': preco_atual,
                     'valor_total': valor_real,
@@ -674,7 +691,7 @@ class TradingBot:
         # ═══════════════════════════════════════════════════════════════════
         # Ordenar metas por lucro percentual (maior para menor)
         metas_ordenadas = sorted(
-            settings.METAS_VENDA,
+            self.config['METAS_VENDA'],
             key=lambda x: x['lucro_percentual'],
             reverse=True
         )
@@ -697,8 +714,8 @@ class TradingBot:
         # SISTEMA DE DOIS GATILHOS:
         # 1. gatilho_ativacao_lucro_pct: "arma" a zona quando high-water mark ultrapassa
         # 2. gatilho_venda_reversao_pct: dispara a venda quando lucro cai este valor desde o pico
-        if hasattr(settings, 'VENDAS_DE_SEGURANCA') and settings.VENDAS_DE_SEGURANCA:
-            for zona in settings.VENDAS_DE_SEGURANCA:
+        if hasattr(self.config, 'VENDAS_DE_SEGURANCA') and self.config['VENDAS_DE_SEGURANCA']:
+            for zona in self.config['VENDAS_DE_SEGURANCA']:
                 nome_zona = zona['nome']
 
                 # GATILHO 1: Ativação - High-water mark deve ultrapassar este valor
@@ -735,7 +752,7 @@ class TradingBot:
                     valor_ordem = quantidade_venda * preco_atual
 
                     # Validar valor mínimo
-                    if valor_ordem >= settings.VALOR_MINIMO_ORDEM and quantidade_venda >= Decimal('1'):
+                    if valor_ordem >= self.config['VALOR_MINIMO_ORDEM'] and quantidade_venda >= Decimal('1'):
                         self.logger.info(f"🛡️ ZONA DE SEGURANÇA '{nome_zona}' ATIVADA!")
                         self.logger.info(f"   📊 High-Water Mark: {self.high_water_mark_profit:.2f}%")
                         self.logger.info(f"   🎯 Gatilho ativação: {gatilho_ativacao_pct:.2f}% (armada ✓)")
@@ -795,7 +812,7 @@ class TradingBot:
         valor_ordem = quantidade_venda * preco_atual
 
         # Verificar valor mínimo de ordem ($5.00)
-        if valor_ordem < settings.VALOR_MINIMO_ORDEM:
+        if valor_ordem < self.config['VALOR_MINIMO_ORDEM']:
             self.logger.warning(f"⚠️ Valor de ordem abaixo do mínimo: ${valor_ordem:.2f}")
             return False
 
@@ -809,9 +826,8 @@ class TradingBot:
             preco_medio_antes = self.preco_medio_compra
 
             # Criar ordem de venda
-            ordem = self.api.criar_ordem_mercado(
-                simbolo='ADAUSDT',
-                lado='SELL',
+            ordem = self.exchange_api.place_ordem_venda_market(
+                par=self.config['PAR_PRINCIPAL'],
                 quantidade=float(quantidade_venda)
             )
 
@@ -821,7 +837,7 @@ class TradingBot:
                 lucro_real = valor_ordem - valor_medio_compra
 
                 self.logger.operacao_venda(
-                    par='ADA/USDT',
+                    par=self.config['PAR_PRINCIPAL'],
                     quantidade=float(quantidade_venda),
                     preco=float(preco_atual),
                     meta=meta['meta'],
@@ -873,7 +889,7 @@ class TradingBot:
 
                 self.db.registrar_ordem({
                     'tipo': 'VENDA',
-                    'par': 'ADA/USDT',
+                    'par': self.config['PAR_PRINCIPAL'],
                     'quantidade': quantidade_venda,
                     'preco': preco_atual,
                     'valor_total': valor_ordem,
@@ -958,7 +974,7 @@ class TradingBot:
                 valor_ordem = quantidade_ada * preco_atual
 
                 # Validar valor mínimo
-                if valor_ordem >= settings.VALOR_MINIMO_ORDEM and quantidade_ada >= Decimal('1'):
+                if valor_ordem >= self.config['VALOR_MINIMO_ORDEM'] and quantidade_ada >= Decimal('1'):
                     # Executar recompra
                     sucesso = self._executar_recompra(
                         nome_zona=nome_zona,
@@ -1001,9 +1017,8 @@ class TradingBot:
             preco_medio_antes = self.preco_medio_compra
 
             # Criar ordem de compra
-            ordem = self.api.criar_ordem_mercado(
-                simbolo='ADAUSDT',
-                lado='BUY',
+            ordem = self.exchange_api.place_ordem_compra_market(
+                par=self.config['PAR_PRINCIPAL'],
                 quantidade=float(quantidade_ada)
             )
 
@@ -1013,7 +1028,7 @@ class TradingBot:
                 diferenca_preco = ((preco_atual - preco_venda_original) / preco_venda_original) * Decimal('100')
 
                 self.logger.operacao_compra(
-                    par='ADA/USDT',
+                    par=self.config['PAR_PRINCIPAL'],
                     quantidade=float(quantidade_ada),
                     preco=float(preco_atual),
                     degrau=f"recompra_{nome_zona}",
@@ -1035,7 +1050,7 @@ class TradingBot:
                 # SALVAR NO BANCO DE DADOS
                 self.db.registrar_ordem({
                     'tipo': 'COMPRA',
-                    'par': 'ADA/USDT',
+                    'par': self.config['PAR_PRINCIPAL'],
                     'quantidade': quantidade_ada,
                     'preco': preco_atual,
                     'valor_total': capital_usado,
@@ -1067,7 +1082,9 @@ class TradingBot:
             return False
 
     def _verificar_aportes_brl(self):
-        """Verifica novos aportes em BRL e os converte para USDT."""
+        """
+        Verifica novos aportes em BRL e os converte para USDT.
+        """
         try:
             self.logger.info("🔍 Verificando possíveis aportes em BRL...")
             resultado = self.gerenciador_aportes.processar_aporte_automatico()
@@ -1087,7 +1104,9 @@ class TradingBot:
 
 
     def fazer_backup_periodico(self):
-        """Faz backup do banco de dados periodicamente (1x por dia)"""
+        """
+        Faz backup do banco de dados periodicamente (1x por dia)
+        """
         agora = datetime.now()
         intervalo = timedelta(days=1)
 
@@ -1146,16 +1165,16 @@ class TradingBot:
             Tuple (nome_meta, distancia_pct)
             Ex: ("Venda Fixa 1 (6.0%)", Decimal('2.5'))
         """
-        from config.settings import settings
+        # from config.settings import settings # Removed
 
         if lucro_atual_pct is None:
             # Sem posição - próxima meta é a primeira
-            primeira_meta = min(settings.METAS_VENDA, key=lambda x: x['lucro_percentual'])
+            primeira_meta = min(self.config['METAS_VENDA'], key=lambda x: x['lucro_percentual'])
             meta_pct = Decimal(str(primeira_meta['lucro_percentual']))
             return (f"{primeira_meta['meta']} ({meta_pct}%)", meta_pct)
 
         # Com posição - encontrar próxima meta não atingida
-        metas_ordenadas = sorted(settings.METAS_VENDA, key=lambda x: x['lucro_percentual'])
+        metas_ordenadas = sorted(self.config['METAS_VENDA'], key=lambda x: x['lucro_percentual'])
 
         for meta in metas_ordenadas:
             meta_pct = Decimal(str(meta['lucro_percentual']))
@@ -1164,7 +1183,7 @@ class TradingBot:
                 return (f"{meta['meta']} ({meta_pct}%)", distancia)
 
         # Todas as metas já atingidas
-        ultima_meta = max(settings.METAS_VENDA, key=lambda x: x['lucro_percentual'])
+        ultima_meta = max(self.config['METAS_VENDA'], key=lambda x: x['lucro_percentual'])
         meta_pct = Decimal(str(ultima_meta['lucro_percentual']))
         return (f"{ultima_meta['meta']} ({meta_pct}%)", Decimal('0'))
 
@@ -1346,19 +1365,19 @@ class TradingBot:
         except Exception as e:
             self.logger.error(f"❌ Erro ao gerar painel de status: {e}")
 
-    def loop_principal(self):
+    def run(self):
         """Loop principal do bot"""
         self.logger.banner("🤖 BOT DE TRADING INICIADO")
-        self.logger.info(f"Par: {settings.PAR_PRINCIPAL}")
-        self.logger.info(f"Ambiente: {settings.AMBIENTE}")
-        self.logger.info(f"Capital inicial: ${settings.CAPITAL_INICIAL}")
+        self.logger.info(f"Par: {self.config['PAR_PRINCIPAL']}")
+        self.logger.info(f"Ambiente: {self.config['AMBIENTE']}")
+        self.logger.info(f"Capital inicial: ${self.config['CAPITAL_INICIAL']}")
 
         # Verificar conexão
-        if not self.api.verificar_conexao():
-            self.logger.error("❌ Não foi possível conectar à API Binance")
+        if not self.exchange_api.check_connection():
+            self.logger.error("❌ Não foi possível conectar à API da Exchange")
             return
 
-        self.logger.info("✅ Conectado à Binance")
+        self.logger.info("✅ Conectado à Exchange")
 
         # CRÍTICO: Sincronizar saldo real da Binance com backup local
         # Isso garante que divergências (compras/vendas manuais) sejam detectadas
@@ -1375,7 +1394,7 @@ class TradingBot:
         # Obter preço inicial
         preco_inicial = self.obter_preco_atual()
         if preco_inicial:
-            self.logger.info(f"📊 Preço inicial ADA: ${preco_inicial:.6f}")
+            self.logger.info(f"📊 Preço inicial {self.config['PAR_PRINCIPAL'].split('/')[0]}: ${preco_inicial:.6f}")
             queda_inicial = self.calcular_queda_percentual(preco_inicial)
             if queda_inicial is not None:
                 self.logger.info(f"📉 Distância da SMA: {queda_inicial:.2f}%")
@@ -1459,7 +1478,7 @@ class TradingBot:
                     # 🛡️ GUARDIÃO DE GESTÃO DE RISCO 🛡️
                     # Verifica a exposição antes de qualquer tentativa de compra
                     alocacao_atual_ada = self.gestao_capital.get_alocacao_percentual_ada()
-                    limite_exposicao = Decimal(str(settings.GESTAO_DE_RISCO['exposicao_maxima_percentual_capital']))
+                    limite_exposicao = Decimal(str(self.config['GESTAO_DE_RISCO']['exposicao_maxima_percentual_capital']))
 
                     if alocacao_atual_ada > limite_exposicao:
                         if not self.notificou_exposicao_maxima:
@@ -1472,7 +1491,7 @@ class TradingBot:
 
                         # Lógica de Compras em Camadas para Oportunidades Extremas
                         oportunidades_usadas = self.state.get_state('oportunidades_extremas_usadas', default=[])
-                        camadas_oportunidade = settings.GESTAO_DE_RISCO['compras_de_oportunidade_extrema']
+                        camadas_oportunidade = self.config['GESTAO_DE_RISCO']['compras_de_oportunidade_extrema']
 
                         for camada in camadas_oportunidade:
                             preco_alvo = Decimal(str(camada['preco_alvo']))
@@ -1550,10 +1569,10 @@ class TradingBot:
                         # ESTRATÉGIA NORMAL: Tentar comprar em degraus com cooldown duplo
                         # ═══════════════════════════════════════════════════════════════
                         if not compra_executada and not self.primeira_execucao:
-                            for degrau in settings.DEGRAUS_COMPRA:
+                            for degrau in self.config['DEGRAUS_COMPRA']:
                                 # ═══════════════════════════════════════════════════════════
                                 # DUPLA-CONDIÇÃO: Verificar SMA + Preço Médio
-                                # ═══════════════════════════════════════════════════════════
+                                # ═══════════════════════════════════════════════════════════════
 
                                 # CONDIÇÃO 1: Verificar se degrau está ativo (queda suficiente desde SMA)
                                 condicao_sma_ok = queda_pct >= Decimal(str(degrau['queda_percentual']))
@@ -1563,7 +1582,7 @@ class TradingBot:
 
                                 if self.preco_medio_compra is not None and self.preco_medio_compra > 0:
                                     # Se já tem posição, verificar se preço atual melhora o preço médio
-                                    percentual_melhora = settings.PERCENTUAL_MINIMO_MELHORA_PM / Decimal('100')
+                                    percentual_melhora = self.config['PERCENTUAL_MINIMO_MELHORA_PM'] / Decimal('100')
                                     limite_preco_melhora = self.preco_medio_compra * (Decimal('1') - percentual_melhora)
                                     condicao_melhora_pm_ok = preco_atual <= limite_preco_melhora
 
@@ -1612,7 +1631,7 @@ class TradingBot:
                                         # Degrau ativo pela SMA, mas preço não melhora suficiente o PM
                                         self.logger.debug(
                                             f"📊 Degrau {degrau['nivel']}: SMA OK ({queda_pct:.2f}%), mas preço ${preco_atual:.6f} "
-                                            f"não melhora PM (${self.preco_medio_compra:.6f}) em {settings.PERCENTUAL_MINIMO_MELHORA_PM}%"
+                                            f"não melhora PM (${self.preco_medio_compra:.6f}) em {self.config['PERCENTUAL_MINIMO_MELHORA_PM']}%"
                                         )
 
                 # LÓGICA DE VENDA (só vende com lucro!)
@@ -1681,9 +1700,44 @@ class TradingBot:
 
 def main():
     """Função principal"""
-    bot = TradingBot()
-    bot.loop_principal()
+    # Exemplo de configuração (isso viria de um arquivo de configuração real)
+    bot_config = {
+        'BINANCE_API_KEY': settings.BINANCE_API_KEY,
+        'BINANCE_API_SECRET': settings.BINANCE_API_SECRET,
+        'BINANCE_API_URL': settings.BINANCE_API_URL,
+        'APORTES': settings.APORTES,
+        'DATABASE_PATH': settings.DATABASE_PATH,
+        'BACKUP_DIR': settings.BACKUP_DIR,
+        'PAR_PRINCIPAL': settings.PAR_PRINCIPAL,
+        'COOLDOWN_GLOBAL_APOS_COMPRA_MINUTOS': settings.COOLDOWN_GLOBAL_APOS_COMPRA_MINUTOS,
+        'DEGRAUS_COMPRA': settings.DEGRAUS_COMPRA,
+        'VALOR_MINIMO_ORDEM': settings.VALOR_MINIMO_ORDEM,
+        'METAS_VENDA': settings.METAS_VENDA,
+        'GESTAO_DE_RISCO': settings.GESTAO_DE_RISCO,
+        'PERCENTUAL_MINIMO_MELHORA_PM': settings.PERCENTUAL_MINIMO_MELHORA_PM,
+        'PERCENTUAL_RESERVA': settings.PERCENTUAL_RESERVA,
+        'AMBIENTE': settings.AMBIENTE,
+        'CAPITAL_INICIAL': settings.CAPITAL_INICIAL,
+        'TAMANHO_BUFFER_PRECOS': settings.TAMANHO_BUFFER_PRECOS,
+        'STATE_FILE_PATH': 'dados/bot_state.json' # Assuming this is a config parameter
+    }
+
+    # Instanciar a API da Binance
+    binance_api = BinanceAPI(
+        api_key=bot_config['BINANCE_API_KEY'],
+        api_secret=bot_config['BINANCE_API_SECRET'],
+        base_url=bot_config['BINANCE_API_URL']
+    )
+
+    bot = TradingBot(bot_config, binance_api)
+    bot.run()
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        bot.logger.warning("\n⚠️ Operação cancelada")
+    except Exception as e:
+        bot.logger.error(f"❌ Erro: {e}")
+        bot.logger.exception("Traceback:")

@@ -1,38 +1,26 @@
-"""
-API Manager - Comunicação com Binance API
-"""
+from abc import ABC, abstractmethod
+from typing import Dict, Any, List, Optional
+from decimal import Decimal
 import hashlib
 import hmac
 import time
-from decimal import Decimal
-from typing import Dict, List, Optional
 from urllib.parse import urlencode
 
 import requests
 
 from src.utils.logger import get_loggers
+from src.exchange.base import ExchangeAPI # New import
 
 logger, _ = get_loggers()
 
 
-class APIManager:
+class BinanceAPI(ExchangeAPI):
     """
-    Gerencia comunicação com Binance API
-
-    Recursos:
-    - Autenticação HMAC SHA256
-    - Requisições REST
-    - Tratamento de erros
-    - Rate limiting
+    Implementação da API da Binance, herdando da classe base ExchangeAPI.
+    Gerencia a comunicação com a Binance API para operações de trading.
     """
 
     def __init__(self, api_key: str, api_secret: str, base_url: str):
-        """
-        Args:
-            api_key: API Key da Binance
-            api_secret: API Secret da Binance
-            base_url: URL base da API
-        """
         self.api_key = api_key
         self.api_secret = api_secret
         self.base_url = base_url.rstrip('/')
@@ -104,12 +92,126 @@ class APIManager:
                 logger.erro_api(endpoint, str(e))
             raise
 
-    def obter_saldos(self) -> List[Dict]:
-        """
-        Obtém saldos da conta
+    # --- Métodos da Interface ExchangeAPI ---
 
-        Returns:
-            Lista de saldos: [{'asset': 'BRL', 'free': '100.00', 'locked': '0.00'}, ...]
+    def get_preco_atual(self, par: str) -> float:
+        """
+        Obtém o preço atual de um par de moedas.
+        Implementa o método abstrato de ExchangeAPI.
+        """
+        try:
+            # Binance API expects 'ADAUSDT', not 'ADA/USDT'
+            binance_symbol = par.replace('/', '').upper()
+            resposta = self._fazer_requisicao(
+                'GET',
+                '/api/v3/ticker/price',
+                params={'symbol': binance_symbol}
+            )
+            return float(resposta['price'])
+        except Exception as e:
+            logger.erro_api(f'get_preco_atual/{par}', str(e))
+            raise
+
+    def get_saldo_disponivel(self, moeda: str) -> float:
+        """
+        Obtém o saldo disponível de uma moeda específica.
+        Implementa o método abstrato de ExchangeAPI.
+        """
+        try:
+            saldos_raw = self._get_all_balances() # Call internal helper
+            for saldo in saldos_raw:
+                if saldo['asset'].upper() == moeda.upper():
+                    return float(saldo['free'])
+            return 0.0 # Return 0 if currency not found
+        except Exception as e:
+            logger.erro_api(f'get_saldo_disponivel/{moeda}', str(e))
+            raise
+
+    def place_ordem_compra_market(self, par: str, quantidade: float) -> Dict[str, Any]:
+        """
+        Coloca uma ordem de compra a mercado.
+        Implementa o método abstrato de ExchangeAPI.
+        """
+        # Binance API expects 'ADAUSDT', not 'ADA/USDT'
+        binance_symbol = par.replace('/', '').upper()
+        return self._criar_ordem_mercado(binance_symbol, 'BUY', quantidade)
+
+    def place_ordem_venda_market(self, par: str, quantidade: float) -> Dict[str, Any]:
+        """
+        Coloca uma ordem de venda a mercado.
+        Implementa o método abstrato de ExchangeAPI.
+        """
+        # Binance API expects 'ADAUSDT', not 'ADA/USDT'
+        binance_symbol = par.replace('/', '').upper()
+        return self._criar_ordem_mercado(binance_symbol, 'SELL', quantidade)
+
+    def get_info_conta(self) -> Dict[str, Any]:
+        """
+        Obtém informações gerais da conta, incluindo saldos.
+        Implementa o método abstrato de ExchangeAPI.
+        """
+        try:
+            resposta = self._fazer_requisicao(
+                'GET',
+                '/api/v3/account',
+                assinado=True
+            )
+            return resposta
+        except Exception as e:
+            logger.erro_api('get_info_conta', str(e))
+            raise
+
+    def check_connection(self) -> bool:
+        """
+        Verifica a conectividade com a API da exchange.
+        Implementa o método abstrato de ExchangeAPI.
+        """
+        try:
+            self._fazer_requisicao('GET', '/api/v3/ping')
+            return True
+        except:
+            return False
+
+    def get_historico_ordens(self, par: str, limite: int = 500, order_id: Optional[int] = None) -> List[Dict]:
+        """
+        Obtém o histórico de ordens de um par específico.
+        Implementa o método abstrato de ExchangeAPI.
+        """
+        try:
+            binance_symbol = par.replace('/', '').upper()
+            params = {
+                'symbol': binance_symbol,
+                'limit': min(limite, 1000)  # Binance limita em 1000
+            }
+
+            if order_id:
+                params['orderId'] = order_id
+
+            resposta = self._fazer_requisicao(
+                'GET',
+                '/api/v3/allOrders',
+                assinado=True,
+                params=params
+            )
+
+            # Filtrar apenas ordens FILLED (executadas)
+            ordens_executadas = [
+                ordem for ordem in resposta
+                if ordem.get('status') == 'FILLED'
+            ]
+
+            return ordens_executadas
+
+        except Exception as e:
+            logger.erro_api(f'get_historico_ordens/{par}', str(e))
+            return []
+
+    # --- Métodos Auxiliares (antigos métodos do APIManager, adaptados) ---
+
+    def _get_all_balances(self) -> List[Dict]: # Renamed from obter_saldos
+        """
+        Obtém todos os saldos da conta.
+        Usado internamente por get_saldo_disponivel.
         """
         try:
             resposta = self._fazer_requisicao(
@@ -118,7 +220,6 @@ class APIManager:
                 assinado=True
             )
 
-            # Filtrar apenas saldos > 0
             saldos = []
             for balance in resposta.get('balances', []):
                 free = Decimal(balance['free'])
@@ -132,60 +233,25 @@ class APIManager:
                         'locked': str(locked),
                         'total': str(total)
                     })
-
             return saldos
-
         except Exception as e:
-            logger.erro_api('obter_saldos', str(e))
-            return []
+            logger.erro_api('_get_all_balances', str(e))
+            raise # Re-raise to be handled by calling method
 
-    def obter_ticker(self, simbolo: str) -> Dict:
-        """
-        Obtém ticker de preço
-
-        Args:
-            simbolo: Par (ex: ADAUSDT, USDTBRL)
-
-        Returns:
-            {'symbol': 'ADAUSDT', 'price': '0.8150'}
-        """
-        try:
-            resposta = self._fazer_requisicao(
-                'GET',
-                '/api/v3/ticker/price',
-                params={'symbol': simbolo.upper()}
-            )
-            return resposta
-
-        except Exception as e:
-            logger.erro_api(f'obter_ticker/{simbolo}', str(e))
-            raise
-
-    def criar_ordem_mercado(
+    def _criar_ordem_mercado( # Renamed from criar_ordem_mercado
         self,
-        simbolo: str,
+        simbolo: str, # This is now the Binance format, e.g., 'ADAUSDT'
         lado: str,
         quantidade: float
     ) -> Optional[Dict]:
         """
-        Cria ordem a mercado
-
-        Args:
-            simbolo: Par (ex: ADAUSDT, USDTBRL)
-            lado: BUY ou SELL
-            quantidade: Quantidade da moeda base
-
-        Returns:
-            Dados da ordem executada ou None se falhou
+        Cria ordem a mercado (auxiliar para place_ordem_compra/venda_market).
         """
         try:
             # Formatar quantidade corretamente para ADAUSDT (step size = 0.1)
-            # Binance rejeita se não for múltiplo exato de stepSize
             if simbolo.upper() == 'ADAUSDT':
-                # Formatar com 1 casa decimal (0.1 é o stepSize de ADA)
                 quantidade_formatada = f"{quantidade:.1f}"
             else:
-                # Para outros pares, usar formatação padrão
                 quantidade_formatada = str(quantidade)
 
             params = {
@@ -208,8 +274,8 @@ class APIManager:
             return resposta
 
         except Exception as e:
-            logger.erro_api(f'criar_ordem/{simbolo}', str(e))
-            return None
+            logger.erro_api(f'_criar_ordem_mercado/{simbolo}', str(e))
+            raise # Re-raise to be handled by calling method
 
     def obter_info_simbolo(self, simbolo: str) -> Optional[Dict]:
         """
@@ -222,10 +288,11 @@ class APIManager:
             Informações do símbolo (filters, precision, etc)
         """
         try:
+            binance_symbol = simbolo.replace('/', '').upper()
             resposta = self._fazer_requisicao(
                 'GET',
                 '/api/v3/exchangeInfo',
-                params={'symbol': simbolo.upper()}
+                params={'symbol': binance_symbol}
             )
 
             symbols = resposta.get('symbols', [])
@@ -236,19 +303,6 @@ class APIManager:
         except Exception as e:
             logger.erro_api(f'obter_info_simbolo/{simbolo}', str(e))
             return None
-
-    def verificar_conexao(self) -> bool:
-        """
-        Verifica se API está acessível
-
-        Returns:
-            True se conectado, False caso contrário
-        """
-        try:
-            self._fazer_requisicao('GET', '/api/v3/ping')
-            return True
-        except:
-            return False
 
     def obter_klines(
         self,
@@ -283,8 +337,9 @@ class APIManager:
             ]
         """
         try:
+            binance_symbol = simbolo.replace('/', '').upper()
             params = {
-                'symbol': simbolo.upper(),
+                'symbol': binance_symbol,
                 'interval': intervalo,
                 'limit': min(limite, 1000)  # Binance limita em 1000
             }
@@ -304,66 +359,4 @@ class APIManager:
 
         except Exception as e:
             logger.erro_api(f'obter_klines/{simbolo}/{intervalo}', str(e))
-            return []
-
-    def obter_historico_ordens(
-        self,
-        simbolo: str,
-        limite: int = 500,
-        order_id: Optional[int] = None
-    ) -> List[Dict]:
-        """
-        Obtém histórico de ordens de um símbolo
-
-        Args:
-            simbolo: Par (ex: ADAUSDT)
-            limite: Número máximo de ordens (default: 500, max: 1000)
-            order_id: ID da ordem para buscar a partir dela (opcional)
-
-        Returns:
-            Lista de ordens: [
-                {
-                    'symbol': 'ADAUSDT',
-                    'orderId': 123456,
-                    'clientOrderId': 'web_xxx',
-                    'price': '0.00',
-                    'origQty': '10.0',
-                    'executedQty': '10.0',
-                    'cummulativeQuoteQty': '6.50',
-                    'status': 'FILLED',
-                    'type': 'MARKET',
-                    'side': 'BUY',
-                    'time': 1234567890000,
-                    'updateTime': 1234567890000,
-                    'isWorking': False,
-                    ...
-                }
-            ]
-        """
-        try:
-            params = {
-                'symbol': simbolo.upper(),
-                'limit': min(limite, 1000)  # Binance limita em 1000
-            }
-
-            if order_id:
-                params['orderId'] = order_id
-
-            resposta = self._fazer_requisicao(
-                'GET',
-                '/api/v3/allOrders',
-                assinado=True,
-                params=params
-            )
-
-            # Filtrar apenas ordens FILLED (executadas)
-            ordens_executadas = [
-                ordem for ordem in resposta
-                if ordem.get('status') == 'FILLED'
-            ]
-
-            return ordens_executadas
-
-        except Exception as e:
-            logger.erro_api(f'obter_historico_ordens/{simbolo}', str(e))
             return []
