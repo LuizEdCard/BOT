@@ -299,44 +299,67 @@ class Logger:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# INSTÂNCIA GLOBAL
+# INSTÂNCIAS GLOBAIS
 # ═══════════════════════════════════════════════════════════════════
 
-_logger_global: Optional[Logger] = None
+_bot_logger_global: Optional[Logger] = None
+_panel_logger_global: Optional[logging.Logger] = None
 
-
-def get_logger(
+def get_loggers(
     nome: str = 'TradingBot',
     log_dir: Optional[Path] = None,
     config: Optional[Dict[str, Any]] = None,
     console: bool = True
-) -> Logger:
+) -> (Logger, logging.Logger):
     """
-    Retorna instância do logger (singleton)
+    Retorna as instâncias dos loggers (padrão e painel) em modo singleton.
 
     Args:
-        nome: Nome do logger
-        log_dir: Diretório para logs
+        nome: Nome base para os loggers
+        log_dir: Diretório para logs de arquivo (usado apenas pelo bot_logger)
         config: Dicionário de configuração (usa LogConfig.DEFAULT se None)
-        console: Exibir no console
+        console: Se deve exibir logs no console
 
     Returns:
-        Instância do Logger
+        Tupla contendo a instância do Logger principal e do logger do painel
     """
-    global _logger_global
+    global _bot_logger_global, _panel_logger_global
 
-    if _logger_global is None:
-        _logger_global = Logger(
+    if _bot_logger_global is None:
+        # 1. Logger principal do Bot (usa a classe Logger customizada)
+        _bot_logger_global = Logger(
             nome=nome,
             log_dir=log_dir,
             config=config,
             console=console
         )
 
-    return _logger_global
+    if _panel_logger_global is None:
+        # 2. Logger dedicado para o painel (usa logging padrão)
+        _panel_logger_global = logging.getLogger('panel_logger')
+        _panel_logger_global.setLevel(logging.INFO)
+
+        # Prevenir que os logs do painel subam para o logger root
+        _panel_logger_global.propagate = False
+
+        # Limpar handlers para evitar duplicação em re-execuções
+        if _panel_logger_global.hasHandlers():
+            _panel_logger_global.handlers.clear()
+
+        # Formatter minimalista apenas com a mensagem
+        panel_formatter = logging.Formatter('%(message)s')
+
+        # Handler do console para o painel
+        panel_handler = logging.StreamHandler(sys.stdout)
+        panel_handler.setFormatter(panel_formatter)
+
+        _panel_logger_global.addHandler(panel_handler)
+
+    return _bot_logger_global, _panel_logger_global
 
 
-def reset_logger():
-    """Reseta o logger global (útil para testes)"""
-    global _logger_global
-    _logger_global = None
+def reset_loggers():
+    """Reseta os loggers globais (útil para testes)"""
+    global _bot_logger_global, _panel_logger_global
+    _bot_logger_global = None
+    _panel_logger_global = None

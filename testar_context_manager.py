@@ -9,9 +9,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from decimal import Decimal
 from src.persistencia.database import DatabaseManager
 from config.settings import settings
-from src.utils.logger import get_logger
+from src.utils.logger import get_loggers
 
-logger = get_logger(
+logger, _ = get_loggers(
     log_dir=Path('logs'),
     # config usa LogConfig.DEFAULT,
     console=True

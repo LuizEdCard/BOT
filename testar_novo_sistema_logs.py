@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import time
 from decimal import Decimal
-from src.utils.logger import get_logger
+from src.utils.logger import get_loggers, reset_loggers
 from src.utils.painel_status import PainelStatus
 from src.utils.constants import Icones, LogConfig, PainelConfig
 
@@ -20,7 +20,7 @@ print("=" * 70)
 print("\n📝 TESTE 1: Timestamps diferentes para console e arquivo")
 print("-" * 70)
 
-logger = get_logger(
+logger, _ = get_loggers(
     nome='TesteBot',
     log_dir=Path('logs'),
     config=LogConfig.DEFAULT,
@@ -151,10 +151,9 @@ print("\n📝 TESTE 5: Modos de Configuração do Logger")
 print("-" * 70)
 
 print("\nTestando modo DESENVOLVIMENTO (mais verbose):")
-from src.utils.logger import reset_logger
-reset_logger()
+reset_loggers()
 
-logger_dev = get_logger(
+logger_dev, _ = get_loggers(
     nome='TesteBot',
     log_dir=Path('logs'),
     config=LogConfig.DESENVOLVIMENTO,
@@ -167,9 +166,9 @@ logger_dev.info("Este é um log de INFO")
 print("✅ Modo DESENVOLVIMENTO permite logs DEBUG")
 
 print("\nTestando modo MONITORAMENTO (ultra compacto):")
-reset_logger()
+reset_loggers()
 
-logger_mon = get_logger(
+logger_mon, _ = get_loggers(
     nome='TesteBot',
     log_dir=Path('logs'),
     config=LogConfig.MONITORAMENTO,

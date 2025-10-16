@@ -9,9 +9,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from decimal import Decimal
 from config.settings import settings
 from src.comunicacao.api_manager import APIManager
-from src.utils.logger import get_logger
+from src.utils.logger import get_loggers
 
-logger = get_logger(log_dir=Path('logs'), nivel='INFO', console=True)
+logger, _ = get_loggers(log_dir=Path('logs'), nivel='INFO', console=True)
 
 
 def comprar_ada_manual(quantidade_ada: float = None, valor_usdt: float = None):

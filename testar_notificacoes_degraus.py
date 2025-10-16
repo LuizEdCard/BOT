@@ -7,10 +7,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from datetime import datetime, timedelta
-from src.utils.logger import get_logger
+from src.utils.logger import get_loggers
 
 # Configurar logger
-logger = get_logger(
+logger, _ = get_loggers(
     log_dir=Path('logs'),
     nivel='INFO',
     console=True

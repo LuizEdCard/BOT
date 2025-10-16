@@ -6,9 +6,9 @@ from typing import Optional, Dict
 from datetime import datetime
 import time
 
-from src.utils.logger import get_logger
+from src.utils.logger import get_loggers
 
-logger = get_logger()
+logger, _ = get_loggers()
 
 
 class GerenciadorAportes:

@@ -11,10 +11,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config.settings import settings
 from src.comunicacao.api_manager import APIManager
 from src.core.gerenciador_aportes import GerenciadorAportes
-from src.utils.logger import get_logger
+from src.utils.logger import get_loggers
 
 # Configurar logger
-logger = get_logger(
+logger, _ = get_loggers(
     log_dir=Path('logs'),
     nivel=settings.LOG_LEVEL,
     console=True

@@ -21,15 +21,8 @@ from src.core.analise_tecnica import AnaliseTecnica
 from src.core.gestao_capital import GestaoCapital
 from src.persistencia.database import DatabaseManager
 from src.persistencia.state_manager import StateManager
-from src.utils.logger import get_logger
+from src.utils.logger import get_loggers
 from src.utils.constants import Icones, LogConfig
-
-# Configurar logger com formato configurável
-logger = get_logger(
-    log_dir=Path('logs'),
-    config=LogConfig.DEFAULT,  # Usa configuração padrão (produção)
-    console=True
-)
 
 
 class TradingBot:
@@ -37,6 +30,11 @@ class TradingBot:
 
     def __init__(self):
         """Inicializar bot"""
+        self.logger, self.panel_logger = get_loggers(
+            log_dir=Path('logs'),
+            config=LogConfig.DEFAULT,
+            console=True
+        )
         self.api = APIManager(
             api_key=settings.BINANCE_API_KEY,
             api_secret=settings.BINANCE_API_SECRET,
@@ -124,21 +122,21 @@ class TradingBot:
                 if self.preco_medio_compra and self.quantidade_total_comprada > 0:
                     self.valor_total_investido = self.preco_medio_compra * self.quantidade_total_comprada
 
-                    logger.info("🔄 Estado recuperado do banco de dados:")
-                    logger.info(f"   Preço médio: ${self.preco_medio_compra:.6f}")
-                    logger.info(f"   Quantidade (local): {self.quantidade_total_comprada:.1f} ADA")
-                    logger.info(f"   Valor investido: ${self.valor_total_investido:.2f} USDT")
+                    self.logger.info("🔄 Estado recuperado do banco de dados:")
+                    self.logger.info(f"   Preço médio: ${self.preco_medio_compra:.6f}")
+                    self.logger.info(f"   Quantidade (local): {self.quantidade_total_comprada:.1f} ADA")
+                    self.logger.info(f"   Valor investido: ${self.valor_total_investido:.2f} USDT")
                 else:
-                    logger.info("📊 Iniciando com estado limpo (sem posições anteriores)")
+                    self.logger.info("📊 Iniciando com estado limpo (sem posições anteriores)")
             else:
-                logger.info("📊 Nenhum estado anterior encontrado - iniciando do zero")
+                self.logger.info("📊 Nenhum estado anterior encontrado - iniciando do zero")
 
             # Recuperar timestamp da última compra global (para cooldown global)
             self._recuperar_timestamp_ultima_compra_global()
 
         except Exception as e:
-            logger.error(f"⚠️ Erro ao recuperar estado do banco: {e}")
-            logger.info("📊 Continuando com estado limpo")
+            self.logger.error(f"⚠️ Erro ao recuperar estado do banco: {e}")
+            self.logger.info("📊 Continuando com estado limpo")
 
     def _sincronizar_saldos_binance(self):
         """
@@ -152,7 +150,7 @@ class TradingBot:
         Executado no início do bot e após conversões de BRL.
         """
         try:
-            logger.info("🔄 Sincronizando saldos com a Binance...")
+            self.logger.info("🔄 Sincronizando saldos com a Binance...")
 
             # Buscar saldo real da API Binance
             saldos_binance = self.obter_saldos()
@@ -162,17 +160,17 @@ class TradingBot:
             # Comparar com estado local
             saldo_ada_local = self.quantidade_total_comprada
 
-            logger.info(f"📊 Saldo local (backup): {saldo_ada_local:.1f} ADA")
-            logger.info(f"📊 Saldo Binance (real): {saldo_ada_real:.1f} ADA | ${saldo_usdt_real:.2f} USDT")
+            self.logger.info(f"📊 Saldo local (backup): {saldo_ada_local:.1f} ADA")
+            self.logger.info(f"📊 Saldo Binance (real): {saldo_ada_real:.1f} ADA | ${saldo_usdt_real:.2f} USDT")
 
             # Verificar divergência
             diferenca = abs(saldo_ada_real - saldo_ada_local)
 
             if diferenca >= Decimal('0.1'):  # Diferença significativa (>= 0.1 ADA)
-                logger.warning("⚠️ DIVERGÊNCIA DETECTADA entre backup local e Binance!")
-                logger.warning(f"   Diferença: {diferenca:.1f} ADA")
-                logger.warning("")
-                logger.warning("🔄 Sincronizando com saldo REAL da Binance...")
+                self.logger.warning("⚠️ DIVERGÊNCIA DETECTADA entre backup local e Binance!")
+                self.logger.warning(f"   Diferença: {diferenca:.1f} ADA")
+                self.logger.warning("")
+                self.logger.warning("🔄 Sincronizando com saldo REAL da Binance...")
 
                 # Atualizar quantidade com saldo real da Binance
                 self.quantidade_total_comprada = saldo_ada_real
@@ -180,39 +178,39 @@ class TradingBot:
                 # Recalcular valor investido (mantendo preço médio se existir)
                 if self.preco_medio_compra and self.quantidade_total_comprada > 0:
                     self.valor_total_investido = self.preco_medio_compra * self.quantidade_total_comprada
-                    logger.info(f"✅ Posição sincronizada: {self.quantidade_total_comprada:.1f} ADA")
-                    logger.info(f"   Preço médio mantido: ${self.preco_medio_compra:.6f}")
-                    logger.info(f"   Valor investido recalculado: ${self.valor_total_investido:.2f} USDT")
+                    self.logger.info(f"✅ Posição sincronizada: {self.quantidade_total_comprada:.1f} ADA")
+                    self.logger.info(f"   Preço médio mantido: ${self.preco_medio_compra:.6f}")
+                    self.logger.info(f"   Valor investido recalculado: ${self.valor_total_investido:.2f} USDT")
                 elif self.quantidade_total_comprada > 0:
                     # Tem ADA mas não tem preço médio - calcular baseado em preço atual
                     preco_atual = self.obter_preco_atual()
                     if preco_atual:
                         self.preco_medio_compra = preco_atual
                         self.valor_total_investido = self.quantidade_total_comprada * preco_atual
-                        logger.warning("⚠️ Preço médio não encontrado - usando preço atual como referência")
-                        logger.info(f"   Preço atual: ${preco_atual:.6f}")
-                        logger.info(f"   Valor investido estimado: ${self.valor_total_investido:.2f} USDT")
+                        self.logger.warning("⚠️ Preço médio não encontrado - usando preço atual como referência")
+                        self.logger.info(f"   Preço atual: ${preco_atual:.6f}")
+                        self.logger.info(f"   Valor investido estimado: ${self.valor_total_investido:.2f} USDT")
                 else:
                     # Não tem ADA - zerar estado
                     self.preco_medio_compra = None
                     self.valor_total_investido = Decimal('0')
-                    logger.info("✅ Posição zerada (sem ADA na Binance)")
+                    self.logger.info("✅ Posição zerada (sem ADA na Binance)")
 
                 # Atualizar estado no banco com valores sincronizados
                 self.db.atualizar_estado_bot(
                     preco_medio=self.preco_medio_compra,
                     quantidade=self.quantidade_total_comprada
                 )
-                logger.info("💾 Backup local atualizado com saldo da Binance")
+                self.logger.info("💾 Backup local atualizado com saldo da Binance")
             else:
-                logger.info("✅ Saldo local sincronizado com Binance")
+                self.logger.info("✅ Saldo local sincronizado com Binance")
 
-            logger.info(f"💼 Saldo final confirmado: {self.quantidade_total_comprada:.1f} ADA | ${saldo_usdt_real:.2f} USDT")
-            logger.info("")
+            self.logger.info(f"💼 Saldo final confirmado: {self.quantidade_total_comprada:.1f} ADA | ${saldo_usdt_real:.2f} USDT")
+            self.logger.info("")
 
         except Exception as e:
-            logger.error(f"❌ Erro ao sincronizar saldo com Binance: {e}")
-            logger.warning("⚠️ Continuando com saldo local (pode estar desatualizado)")
+            self.logger.error(f"❌ Erro ao sincronizar saldo com Binance: {e}")
+            self.logger.warning("⚠️ Continuando com saldo local (pode estar desatualizado)")
 
     def _recuperar_timestamp_ultima_compra_global(self):
         """
@@ -226,13 +224,13 @@ class TradingBot:
                 timestamp_compra = datetime.fromisoformat(timestamp_str)
                 tempo_decorrido = datetime.now() - timestamp_compra
                 minutos = int(tempo_decorrido.total_seconds() / 60)
-                logger.info(f"🕒 Última compra global: há {minutos} minutos")
+                self.logger.info(f"🕒 Última compra global: há {minutos} minutos")
             # NOTA: Não loga nada se não encontrar timestamp, pois isso é esperado
             # quando o banco está vazio ou quando é realmente a primeira execução
 
         except Exception as e:
-            logger.error(f"⚠️ Erro ao recuperar timestamp da última compra: {e}")
-            logger.info("📋 Continuando sem histórico")
+            self.logger.error(f"⚠️ Erro ao recuperar timestamp da última compra: {e}")
+            self.logger.info("📋Continuando sem histórico")
 
     def importar_historico_binance(self, simbolo: str = 'ADAUSDT', limite: int = 500):
         """
@@ -246,24 +244,24 @@ class TradingBot:
             Dicionário com estatísticas da importação
         """
         try:
-            logger.info(f"📥 Importando histórico de ordens da Binance ({simbolo})...")
+            self.logger.info(f"📥 Importando histórico de ordens da Binance ({simbolo})...")
 
             # Buscar ordens da Binance
             ordens = self.api.obter_historico_ordens(simbolo=simbolo, limite=limite)
 
             if not ordens:
-                logger.info("📭 Nenhuma ordem encontrada no histórico da Binance")
+                self.logger.info("📭 Nenhuma ordem encontrada no histórico da Binance")
                 return {'importadas': 0, 'duplicadas': 0, 'erros': 0}
 
-            logger.info(f"📋 Encontradas {len(ordens)} ordens no histórico da Binance")
+            self.logger.info(f"📋 Encontradas {len(ordens)} ordens no histórico da Binance")
 
             # Importar para o banco de dados
             resultado = self.db.importar_ordens_binance(ordens, recalcular_preco_medio=True)
 
-            logger.info(f"✅ Importação concluída:")
-            logger.info(f"   Importadas: {resultado['importadas']}")
-            logger.info(f"   Duplicadas: {resultado['duplicadas']}")
-            logger.info(f"   Erros: {resultado['erros']}")
+            self.logger.info(f"✅ Importação concluída:")
+            self.logger.info(f"   Importadas: {resultado['importadas']}")
+            self.logger.info(f"   Duplicadas: {resultado['duplicadas']}")
+            self.logger.info(f"   Erros: {resultado['erros']}")
 
             # Atualizar estado do bot com valores recalculados
             if resultado['importadas'] > 0:
@@ -272,7 +270,7 @@ class TradingBot:
             return resultado
 
         except Exception as e:
-            logger.error(f"❌ Erro ao importar histórico: {e}")
+            self.logger.error(f"❌ Erro ao importar histórico: {e}")
             return {'importadas': 0, 'duplicadas': 0, 'erros': 1}
 
     def obter_preco_atual(self) -> Optional[Decimal]:
@@ -288,7 +286,7 @@ class TradingBot:
 
             return preco
         except Exception as e:
-            logger.erro_api('obter_preco_atual', str(e))
+            self.logger.erro_api('obter_preco_atual', str(e))
             return None
 
     def obter_saldos(self) -> Dict:
@@ -310,7 +308,7 @@ class TradingBot:
                 'ada': saldo_ada
             }
         except Exception as e:
-            logger.erro_api('obter_saldos', str(e))
+            self.logger.erro_api('obter_saldos', str(e))
             return {'usdt': Decimal('0'), 'ada': Decimal('0')}
 
     def atualizar_sma(self):
@@ -324,7 +322,7 @@ class TradingBot:
         if (self.ultima_atualizacao_sma is None or
             (agora - self.ultima_atualizacao_sma) >= timedelta(hours=1)):
 
-            logger.info("🔄 Atualizando SMA de referência (4 semanas)...")
+            self.logger.info("🔄 Atualizando SMA de referência (4 semanas)...")
 
             smas = self.analise_tecnica.calcular_sma_multiplos_timeframes(
                 simbolo='ADAUSDT',
@@ -337,9 +335,9 @@ class TradingBot:
                 self.sma_referencia = smas.get('media')  # Média ponderada
                 self.ultima_atualizacao_sma = agora
 
-                logger.info(f"✅ SMA de referência atualizada: ${self.sma_referencia:.6f}")
+                self.logger.info(f"✅ SMA de referência atualizada: ${self.sma_referencia:.6f}")
             else:
-                logger.error("❌ Não foi possível atualizar SMA")
+                self.logger.error("❌ Não foi possível atualizar SMA")
 
     def calcular_queda_percentual(self, preco_atual: Decimal) -> Optional[Decimal]:
         """Calcula queda % desde a SMA de referência"""
@@ -408,7 +406,7 @@ class TradingBot:
             if minutos_decorridos < cooldown_global_minutos:
                 minutos_restantes = int(cooldown_global_minutos - minutos_decorridos)
                 motivo = f"cooldown_global:{minutos_restantes}min"
-                logger.debug(f"🕒 Cooldown global ativo (faltam {minutos_restantes} min)")
+                self.logger.debug(f"🕒 Cooldown global ativo (faltam {minutos_restantes} min)")
                 return (False, motivo)
 
         # VERIFICAÇÃO 2: COOLDOWN POR DEGRAU (intervalo específico do degrau)
@@ -424,7 +422,7 @@ class TradingBot:
             if horas_decorridas < intervalo_horas:
                 horas_restantes = float(intervalo_horas - horas_decorridas)
                 motivo = f"cooldown_degrau:{horas_restantes:.1f}h"
-                logger.debug(f"🕒 Degrau {nivel_degrau} em cooldown (faltam {horas_restantes:.1f}h)")
+                self.logger.debug(f"🕒 Degrau {nivel_degrau} em cooldown (faltam {horas_restantes:.1f}h)")
                 return (False, motivo)
 
         # Passou em todas as verificações
@@ -445,13 +443,13 @@ class TradingBot:
 
         # Registrar cooldown global
         self.state.set_state('ultima_compra_global_ts', timestamp_iso)
-        logger.debug(f"🕒 Cooldown global ativado: {settings.COOLDOWN_GLOBAL_APOS_COMPRA_MINUTOS} minutos")
+        self.logger.debug(f"🕒 Cooldown global ativado: {settings.COOLDOWN_GLOBAL_APOS_COMPRA_MINUTOS} minutos")
 
         # Registrar cooldown por degrau (se especificado)
         if nivel_degrau is not None:
             chave_degrau = f'ultima_compra_degrau_{nivel_degrau}_ts'
             self.state.set_state(chave_degrau, timestamp_iso)
-            logger.debug(f"🕒 Cooldown degrau {nivel_degrau} ativado")
+            self.logger.debug(f"🕒 Cooldown degrau {nivel_degrau} ativado")
 
     def atualizar_preco_medio_compra(self, quantidade: Decimal, preco: Decimal):
         """
@@ -466,7 +464,7 @@ class TradingBot:
 
         if self.quantidade_total_comprada > 0:
             self.preco_medio_compra = self.valor_total_investido / self.quantidade_total_comprada
-            logger.info(f"📊 Preço médio atualizado: ${self.preco_medio_compra:.6f} ({self.quantidade_total_comprada:.1f} ADA)")
+            self.logger.info(f"📊 Preço médio atualizado: ${self.preco_medio_compra:.6f} ({self.quantidade_total_comprada:.1f} ADA)")
         else:
             self.preco_medio_compra = None
 
@@ -504,7 +502,7 @@ class TradingBot:
 
         # Verificar valor mínimo de ordem
         if valor_ordem < settings.VALOR_MINIMO_ORDEM:
-            logger.warning(f"⚠️ Valor de ordem abaixo do mínimo: ${valor_ordem:.2f}")
+            self.logger.warning(f"⚠️ Valor de ordem abaixo do mínimo: ${valor_ordem:.2f}")
             return False
 
         try:
@@ -520,7 +518,7 @@ class TradingBot:
             )
 
             if ordem and ordem.get('status') == 'FILLED':
-                logger.operacao_compra(
+                self.logger.operacao_compra(
                     par='ADA/USDT',
                     quantidade=float(quantidade_ada),
                     preco=float(preco_atual),
@@ -564,18 +562,18 @@ class TradingBot:
 
                 return True
             else:
-                logger.error(f"❌ Erro ao executar compra: {ordem}")
+                self.logger.error(f"❌ Erro ao executar compra: {ordem}")
                 return False
 
         except Exception as e:
-            logger.erro_api('executar_compra', str(e))
+            self.logger.erro_api('executar_compra', str(e))
             return False
 
     def executar_compra_por_valor(self, valor_usdt: Decimal, motivo: str) -> bool:
         """Executa uma compra baseada em um valor em USDT."""
         preco_atual = self.obter_preco_atual()
         if not preco_atual:
-            logger.error("❌ Não foi possível obter o preço atual para a compra por valor.")
+            self.logger.error("❌ Não foi possível obter o preço atual para a compra por valor.")
             return False
 
         # Calcula a quantidade de ADA a comprar
@@ -583,7 +581,7 @@ class TradingBot:
 
         # Validação de valor mínimo da ordem
         if valor_usdt < settings.VALOR_MINIMO_ORDEM:
-            logger.warning(f"⚠️ Valor de ordem abaixo do mínimo: ${valor_usdt:.2f}")
+            self.logger.warning(f"⚠️ Valor de ordem abaixo do mínimo: ${valor_usdt:.2f}")
             return False
 
         try:
@@ -600,7 +598,7 @@ class TradingBot:
                 quantidade_real = Decimal(str(ordem.get('executedQty', '0')))
                 valor_real = Decimal(str(ordem.get('cummulativeQuoteQty', '0')))
 
-                logger.operacao_compra(
+                self.logger.operacao_compra(
                     par='ADA/USDT',
                     quantidade=float(quantidade_real),
                     preco=float(preco_atual),
@@ -638,10 +636,10 @@ class TradingBot:
 
                 return True
             else:
-                logger.error(f"❌ Erro ao executar compra por valor: {ordem}")
+                self.logger.error(f"❌ Erro ao executar compra por valor: {ordem}")
                 return False
         except Exception as e:
-            logger.erro_api('executar_compra_por_valor', str(e))
+            self.logger.erro_api('executar_compra_por_valor', str(e))
             return False
 
     def encontrar_meta_ativa(self, lucro_pct: Decimal, saldo_ada: Decimal, preco_atual: Decimal) -> Optional[Dict]:
@@ -669,7 +667,7 @@ class TradingBot:
         # ═══════════════════════════════════════════════════════════════════
         if lucro_pct > self.high_water_mark_profit:
             self.high_water_mark_profit = lucro_pct
-            logger.debug(f"📊 High-Water Mark atualizado: {self.high_water_mark_profit:.2f}%")
+            self.logger.debug(f"📊 High-Water Mark atualizado: {self.high_water_mark_profit:.2f}%")
 
         # ═══════════════════════════════════════════════════════════════════
         # PRIORIDADE 1: Verificar METAS FIXAS em ordem DECRESCENTE
@@ -684,7 +682,7 @@ class TradingBot:
         # Verificar se alguma meta fixa foi atingida
         for meta in metas_ordenadas:
             if lucro_pct >= Decimal(str(meta['lucro_percentual'])):
-                logger.debug(f"✅ Meta fixa {meta['meta']} atingida ({meta['lucro_percentual']}%)")
+                self.logger.debug(f"✅ Meta fixa {meta['meta']} atingida ({meta['lucro_percentual']}%) ")
 
                 # IMPORTANTE: Resetar estado para próxima escalada
                 self.high_water_mark_profit = Decimal('0')
@@ -738,13 +736,13 @@ class TradingBot:
 
                     # Validar valor mínimo
                     if valor_ordem >= settings.VALOR_MINIMO_ORDEM and quantidade_venda >= Decimal('1'):
-                        logger.info(f"🛡️ ZONA DE SEGURANÇA '{nome_zona}' ATIVADA!")
-                        logger.info(f"   📊 High-Water Mark: {self.high_water_mark_profit:.2f}%")
-                        logger.info(f"   🎯 Gatilho ativação: {gatilho_ativacao_pct:.2f}% (armada ✓)")
-                        logger.info(f"   📉 Lucro atual: {lucro_pct:.2f}%")
-                        logger.info(f"   🎯 Gatilho venda: {gatilho_venda:.2f}% (atingido ✓)")
-                        logger.info(f"   📊 Queda desde pico: {queda_desde_pico:.2f}%")
-                        logger.info(f"   💰 Venda de segurança: {float(quantidade_venda):.1f} ADA (${valor_ordem:.2f})")
+                        self.logger.info(f"🛡️ ZONA DE SEGURANÇA '{nome_zona}' ATIVADA!")
+                        self.logger.info(f"   📊 High-Water Mark: {self.high_water_mark_profit:.2f}%")
+                        self.logger.info(f"   🎯 Gatilho ativação: {gatilho_ativacao_pct:.2f}% (armada ✓)")
+                        self.logger.info(f"   📉 Lucro atual: {lucro_pct:.2f}%")
+                        self.logger.info(f"   🎯 Gatilho venda: {gatilho_venda:.2f}% (atingido ✓)")
+                        self.logger.info(f"   📊 Queda desde pico: {queda_desde_pico:.2f}%")
+                        self.logger.info(f"   💰 Venda de segurança: {float(quantidade_venda):.1f} ADA (${valor_ordem:.2f})")
 
                         return {
                             'meta': f'seguranca_{nome_zona}',
@@ -761,7 +759,7 @@ class TradingBot:
         # over-trading. Agora o bot opera APENAS com:
         # 1. Metas fixas (prioridade máxima)
         # 2. Zonas de segurança baseadas em reversão (proteção inteligente)
-        #
+        # 
         # Esta mudança garante que pequenas flutuações de mercado não causem
         # vendas repetitivas que impedem o lucro de atingir as metas principais.
 
@@ -781,7 +779,7 @@ class TradingBot:
         lucro_pct = self.calcular_lucro_atual(preco_atual)
 
         if lucro_pct is None or lucro_pct <= 0:
-            logger.warning(f"🛡️ VENDA BLOQUEADA: Sem lucro ({lucro_pct:.2f}% - aguardando lucro)")
+            self.logger.warning(f"🛡️ VENDA BLOQUEADA: Sem lucro ({lucro_pct:.2f}% - aguardando lucro)")
             return False
 
         percentual_venda = Decimal(str(meta['percentual_venda'])) / Decimal('100')
@@ -791,14 +789,14 @@ class TradingBot:
         quantidade_venda = (quantidade_venda * Decimal('10')).quantize(Decimal('1'), rounding='ROUND_DOWN') / Decimal('10')
 
         if quantidade_venda < Decimal('1'):  # Mínimo 1 ADA
-            logger.warning(f"⚠️ Quantidade ADA abaixo do mínimo: {quantidade_venda} ADA")
+            self.logger.warning(f"⚠️ Quantidade ADA abaixo do mínimo: {quantidade_venda} ADA")
             return False
 
         valor_ordem = quantidade_venda * preco_atual
 
         # Verificar valor mínimo de ordem ($5.00)
         if valor_ordem < settings.VALOR_MINIMO_ORDEM:
-            logger.warning(f"⚠️ Valor de ordem abaixo do mínimo: ${valor_ordem:.2f}")
+            self.logger.warning(f"⚠️ Valor de ordem abaixo do mínimo: ${valor_ordem:.2f}")
             return False
 
         # Verificar se é venda de segurança
@@ -822,7 +820,7 @@ class TradingBot:
                 valor_medio_compra = quantidade_venda * self.preco_medio_compra
                 lucro_real = valor_ordem - valor_medio_compra
 
-                logger.operacao_venda(
+                self.logger.operacao_venda(
                     par='ADA/USDT',
                     quantidade=float(quantidade_venda),
                     preco=float(preco_atual),
@@ -849,9 +847,9 @@ class TradingBot:
                     # Marcar zona como acionada
                     self.zonas_de_seguranca_acionadas.add(nome_zona)
 
-                    logger.info(f"💰 Capital reservado para recompra: ${valor_ordem:.2f} USDT")
-                    logger.info(f"   📌 Zona '{nome_zona}' marcada como acionada")
-                    logger.info(f"   🔄 Recompra será ativada se lucro cair {zona_seguranca['gatilho_recompra_drop_pct']}% desde o pico")
+                    self.logger.info(f"💰 Capital reservado para recompra: ${valor_ordem:.2f} USDT")
+                    self.logger.info(f"   📌 Zona '{nome_zona}' marcada como acionada")
+                    self.logger.info(f"   🔄 Recompra será ativada se lucro cair {zona_seguranca['gatilho_recompra_drop_pct']}% desde o pico")
 
                 # Ajustar tracking após venda (reduzir quantidade total)
                 self.quantidade_total_comprada -= quantidade_venda
@@ -860,10 +858,10 @@ class TradingBot:
                 # RECALCULAR PREÇO MÉDIO após ajustar valores
                 if self.quantidade_total_comprada > 0:
                     self.preco_medio_compra = self.valor_total_investido / self.quantidade_total_comprada
-                    logger.info(f"📊 Posição atualizada: {self.quantidade_total_comprada:.1f} ADA (preço médio: ${self.preco_medio_compra:.6f})")
+                    self.logger.info(f"📊 Posição atualizada: {self.quantidade_total_comprada:.1f} ADA (preço médio: ${self.preco_medio_compra:.6f})")
                 else:
                     self.preco_medio_compra = None  # Zerou posição
-                    logger.info(f"📊 Posição zerada - todas as ADA vendidas!")
+                    self.logger.info(f"📊 Posição zerada - todas as ADA vendidas!")
 
                 # Capturar saldos depois da venda
                 saldos_depois = self.obter_saldos()
@@ -901,11 +899,11 @@ class TradingBot:
 
                 return True
             else:
-                logger.error(f"❌ Erro ao executar venda: {ordem}")
+                self.logger.error(f"❌ Erro ao executar venda: {ordem}")
                 return False
 
         except Exception as e:
-            logger.erro_api('executar_venda', str(e))
+            self.logger.erro_api('executar_venda', str(e))
             return False
 
     def verificar_recompra_de_seguranca(self, preco_atual: Decimal):
@@ -943,11 +941,11 @@ class TradingBot:
 
             # Verificar se lucro atual caiu abaixo do gatilho
             if lucro_atual <= gatilho_recompra:
-                logger.info(f"🔄 GATILHO DE RECOMPRA ATIVADO - Zona '{nome_zona}'")
-                logger.info(f"   📊 High-Water Mark: {high_mark:.2f}%")
-                logger.info(f"   📉 Lucro atual: {lucro_atual:.2f}%")
-                logger.info(f"   🎯 Gatilho: {gatilho_recompra:.2f}% (queda de {gatilho_recompra_pct:.2f}%)")
-                logger.info(f"   💰 Capital disponível: ${capital_usdt:.2f} USDT")
+                self.logger.info(f"🔄 GATILHO DE RECOMPRA ATIVADO - Zona '{nome_zona}'")
+                self.logger.info(f"   📊 High-Water Mark: {high_mark:.2f}%")
+                self.logger.info(f"   📉 Lucro atual: {lucro_atual:.2f}%")
+                self.logger.info(f"   🎯 Gatilho: {gatilho_recompra:.2f}% (queda de {gatilho_recompra_pct:.2f}%)")
+                self.logger.info(f"   💰 Capital disponível: ${capital_usdt:.2f} USDT")
 
                 # Calcular quantidade de ADA a comprar
                 quantidade_ada = capital_usdt / preco_atual
@@ -974,13 +972,13 @@ class TradingBot:
                         # Marcar zona para remoção
                         zonas_para_remover.append(nome_zona)
                 else:
-                    logger.warning(f"⚠️ Recompra ignorada - valor abaixo do mínimo: ${valor_ordem:.2f}")
+                    self.logger.warning(f"⚠️ Recompra ignorada - valor abaixo do mínimo: ${valor_ordem:.2f}")
                     zonas_para_remover.append(nome_zona)
 
         # Remover zonas que foram recompradas
         for nome_zona in zonas_para_remover:
             del self.capital_para_recompra[nome_zona]
-            logger.debug(f"✅ Capital de zona '{nome_zona}' removido após recompra")
+            self.logger.debug(f"✅ Capital de zona '{nome_zona}' removido após recompra")
 
     def _executar_recompra(self, nome_zona: str, quantidade_ada: Decimal, preco_atual: Decimal,
                           capital_usado: Decimal, dados_zona: Dict) -> bool:
@@ -1014,7 +1012,7 @@ class TradingBot:
                 preco_venda_original = dados_zona['preco_venda']
                 diferenca_preco = ((preco_atual - preco_venda_original) / preco_venda_original) * Decimal('100')
 
-                logger.operacao_compra(
+                self.logger.operacao_compra(
                     par='ADA/USDT',
                     quantidade=float(quantidade_ada),
                     preco=float(preco_atual),
@@ -1022,11 +1020,11 @@ class TradingBot:
                     queda_pct=float(diferenca_preco)
                 )
 
-                logger.info(f"✅ RECOMPRA DE SEGURANÇA EXECUTADA!")
-                logger.info(f"   📦 Comprado: {float(quantidade_ada):.1f} ADA por ${preco_atual:.6f}")
-                logger.info(f"   💵 Custo: ${capital_usado:.2f} USDT")
-                logger.info(f"   📊 Preço venda original: ${preco_venda_original:.6f}")
-                logger.info(f"   📈 Diferença: {diferenca_preco:+.2f}%")
+                self.logger.info(f"✅ RECOMPRA DE SEGURANÇA EXECUTADA!")
+                self.logger.info(f"   📦 Comprado: {float(quantidade_ada):.1f} ADA por ${preco_atual:.6f}")
+                self.logger.info(f"   💵 Custo: ${capital_usado:.2f} USDT")
+                self.logger.info(f"   📊 Preço venda original: ${preco_venda_original:.6f}")
+                self.logger.info(f"   📈 Diferença: {diferenca_preco:+.2f}%")
 
                 # Atualizar preço médio de compra
                 self.atualizar_preco_medio_compra(quantidade_ada, preco_atual)
@@ -1061,31 +1059,31 @@ class TradingBot:
 
                 return True
             else:
-                logger.error(f"❌ Erro ao executar recompra: {ordem}")
+                self.logger.error(f"❌ Erro ao executar recompra: {ordem}")
                 return False
 
         except Exception as e:
-            logger.erro_api('_executar_recompra', str(e))
+            self.logger.erro_api('_executar_recompra', str(e))
             return False
 
     def _verificar_aportes_brl(self):
         """Verifica novos aportes em BRL e os converte para USDT."""
         try:
-            logger.info("🔍 Verificando possíveis aportes em BRL...")
+            self.logger.info("🔍 Verificando possíveis aportes em BRL...")
             resultado = self.gerenciador_aportes.processar_aporte_automatico()
 
             if resultado.get('sucesso'):
-                logger.info(f"✅ Aporte processado: {resultado.get('mensagem')}")
+                self.logger.info(f"✅ Aporte processado: {resultado.get('mensagem')}")
                 # Forçar a sincronização de saldos para atualizar o capital do bot
-                logger.info("🔄 Forçando a sincronização de saldos após o aporte...")
+                self.logger.info("🔄 Forçando a sincronização de saldos após o aporte...")
                 self._sincronizar_saldos_binance()
             else:
                 # Logar apenas se a mensagem não for de saldo insuficiente, para evitar spam
                 if "insuficiente" not in resultado.get('mensagem', ""):
-                    logger.info(f"ℹ️ Nenhum novo aporte detectado. {resultado.get('mensagem')}")
+                    self.logger.info(f"ℹ️ Nenhum novo aporte detectado. {resultado.get('mensagem')}")
 
         except Exception as e:
-            logger.error(f"❌ Erro ao verificar aportes BRL: {e}")
+            self.logger.error(f"❌ Erro ao verificar aportes BRL: {e}")
 
 
     def fazer_backup_periodico(self):
@@ -1095,12 +1093,12 @@ class TradingBot:
 
         if agora - self.ultimo_backup >= intervalo:
             try:
-                logger.info("💾 Criando backup do banco de dados...")
+                self.logger.info("💾 Criando backup do banco de dados...")
                 backup_path = self.db.fazer_backup()
-                logger.info(f"✅ Backup criado: {backup_path}")
+                self.logger.info(f"✅ Backup criado: {backup_path}")
                 self.ultimo_backup = agora
             except Exception as e:
-                logger.error(f"❌ Erro ao criar backup: {e}")
+                self.logger.error(f"❌ Erro ao criar backup: {e}")
 
     def _calcular_volatilidade_mercado(self, preco_atual: Decimal) -> tuple[Decimal, str]:
         """
@@ -1343,44 +1341,44 @@ class TradingBot:
 """
 
             # Logar como uma única string (preserva formatação)
-            logger.info(painel)
+            self.panel_logger.info(painel)
 
         except Exception as e:
-            logger.error(f"❌ Erro ao gerar painel de status: {e}")
+            self.logger.error(f"❌ Erro ao gerar painel de status: {e}")
 
     def loop_principal(self):
         """Loop principal do bot"""
-        logger.banner("🤖 BOT DE TRADING INICIADO")
-        logger.info(f"Par: {settings.PAR_PRINCIPAL}")
-        logger.info(f"Ambiente: {settings.AMBIENTE}")
-        logger.info(f"Capital inicial: ${settings.CAPITAL_INICIAL}")
+        self.logger.banner("🤖 BOT DE TRADING INICIADO")
+        self.logger.info(f"Par: {settings.PAR_PRINCIPAL}")
+        self.logger.info(f"Ambiente: {settings.AMBIENTE}")
+        self.logger.info(f"Capital inicial: ${settings.CAPITAL_INICIAL}")
 
         # Verificar conexão
         if not self.api.verificar_conexao():
-            logger.error("❌ Não foi possível conectar à API Binance")
+            self.logger.error("❌ Não foi possível conectar à API Binance")
             return
 
-        logger.info("✅ Conectado à Binance")
+        self.logger.info("✅ Conectado à Binance")
 
         # CRÍTICO: Sincronizar saldo real da Binance com backup local
         # Isso garante que divergências (compras/vendas manuais) sejam detectadas
         self._sincronizar_saldos_binance()
 
         # Calcular SMA de referência (4 semanas)
-        logger.info("📊 Calculando SMA de referência (4 semanas)...")
+        self.logger.info("📊 Calculando SMA de referência (4 semanas)...")
         self.atualizar_sma()
 
         if not self.sma_referencia:
-            logger.error("❌ Não foi possível calcular SMA. Bot não pode operar.")
+            self.logger.error("❌ Não foi possível calcular SMA. Bot não pode operar.")
             return
 
         # Obter preço inicial
         preco_inicial = self.obter_preco_atual()
         if preco_inicial:
-            logger.info(f"📊 Preço inicial ADA: ${preco_inicial:.6f}")
+            self.logger.info(f"📊 Preço inicial ADA: ${preco_inicial:.6f}")
             queda_inicial = self.calcular_queda_percentual(preco_inicial)
             if queda_inicial is not None:
-                logger.info(f"📉 Distância da SMA: {queda_inicial:.2f}%")
+                self.logger.info(f"📉 Distância da SMA: {queda_inicial:.2f}%")
 
         self.rodando = True
         contador_ciclos = 0
@@ -1392,7 +1390,7 @@ class TradingBot:
                 # Obter preço atual
                 preco_atual = self.obter_preco_atual()
                 if not preco_atual:
-                    logger.warning("⚠️ Não foi possível obter preço, aguardando...")
+                    self.logger.warning("⚠️ Não foi possível obter preço, aguardando...")
                     time.sleep(10)
                     continue
 
@@ -1405,9 +1403,9 @@ class TradingBot:
                 # Log a cada 10 ciclos (aproximadamente 1 minuto)
                 if contador_ciclos % 10 == 0:
                     if queda_pct and self.sma_referencia:
-                        logger.info(f"📊 Preço: ${preco_atual:.6f} | SMA 4sem: ${self.sma_referencia:.6f} | Distância: {queda_pct:.2f}%")
+                        self.logger.info(f"📊 Preço: ${preco_atual:.6f} | SMA 4sem: ${self.sma_referencia:.6f} | Distância: {queda_pct:.2f}%")
                     else:
-                        logger.info(f"📊 Preço: ${preco_atual:.6f}")
+                        self.logger.info(f"📊 Preço: ${preco_atual:.6f}")
 
                 # Obter saldos atuais
                 saldos = self.obter_saldos()
@@ -1429,16 +1427,16 @@ class TradingBot:
                     # SEM SALDO SUFICIENTE - Entrar em modo "Aguardando Saldo"
                     if self.estado_bot != "AGUARDANDO_SALDO":
                         self.estado_bot = "AGUARDANDO_SALDO"
-                        logger.warning("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                        logger.warning("⏸️  BOT EM MODO 'AGUARDANDO SALDO'")
-                        logger.warning("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                        logger.warning(f"   💰 Saldo disponível: ${saldo_disponivel:.2f}")
-                        logger.warning(f"   ⚠️  Mínimo necessário: ${valor_minimo_operar:.2f}")
-                        logger.warning(f"   🛡️  Reserva protegida: ${reserva:.2f}")
-                        logger.warning("")
-                        logger.warning("   📌 Bot pausou verificações de degraus")
-                        logger.warning("   📌 Aguardando venda ou novo aporte para retomar")
-                        logger.warning("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                        self.logger.warning("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                        self.logger.warning("⏸️  BOT EM MODO 'AGUARDANDO SALDO'")
+                        self.logger.warning("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                        self.logger.warning(f"   💰 Saldo disponível: ${saldo_disponivel:.2f}")
+                        self.logger.warning(f"   ⚠️  Mínimo necessário: ${valor_minimo_operar:.2f}")
+                        self.logger.warning(f"   🛡️  Reserva protegida: ${reserva:.2f}")
+                        self.logger.warning("")
+                        self.logger.warning("   📌 Bot pausou verificações de degraus")
+                        self.logger.warning("   📌 Aguardando venda ou novo aporte para retomar")
+                        self.logger.warning("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
                     # NÃO verificar degraus de compra - pular para lógica de venda
                     # (Vendas ainda são permitidas para liberar saldo)
@@ -1446,14 +1444,14 @@ class TradingBot:
                     # TEM SALDO SUFICIENTE - Sair de modo "Aguardando Saldo" se estava nele
                     if self.estado_bot == "AGUARDANDO_SALDO":
                         self.estado_bot = "OPERANDO"
-                        logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                        logger.info("✅ SALDO RESTAURADO - Bot retomando operações")
-                        logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                        logger.info(f"   💰 Saldo disponível: ${saldo_disponivel:.2f}")
-                        logger.info(f"   🛡️  Reserva mantida: ${reserva:.2f}")
-                        logger.info("")
-                        logger.info("   ✅ Verificações de degraus reativadas")
-                        logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                        self.logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                        self.logger.info("✅ SALDO RESTAURADO - Bot retomando operações")
+                        self.logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                        self.logger.info(f"   💰 Saldo disponível: ${saldo_disponivel:.2f}")
+                        self.logger.info(f"   🛡️  Reserva mantida: ${reserva:.2f}")
+                        self.logger.info("")
+                        self.logger.info("   ✅ Verificações de degraus reativadas")
+                        self.logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
                 # LÓGICA DE COMPRA (só executa se estado == "OPERANDO")
                 # ═══════════════════════════════════════════════════════════════════
@@ -1465,11 +1463,11 @@ class TradingBot:
 
                     if alocacao_atual_ada > limite_exposicao:
                         if not self.notificou_exposicao_maxima:
-                            logger.warning("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                            logger.warning(f"🛡️ GUARDIÃO ATIVADO: Exposição máxima de {limite_exposicao}% atingida.")
-                            logger.warning(f"   Alocação atual em ADA: {alocacao_atual_ada:.1f}%")
-                            logger.warning("   Compras normais suspensas. Verificando camadas de oportunidade extrema...")
-                            logger.warning("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                            self.logger.warning("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                            self.logger.warning(f"🛡️ GUARDIÃO ATIVADO: Exposição máxima de {limite_exposicao}% atingida.")
+                            self.logger.warning(f"   Alocação atual em ADA: {alocacao_atual_ada:.1f}%")
+                            self.logger.warning("   Compras normais suspensas. Verificando camadas de oportunidade extrema...")
+                            self.logger.warning("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
                             self.notificou_exposicao_maxima = True
 
                         # Lógica de Compras em Camadas para Oportunidades Extremas
@@ -1480,7 +1478,7 @@ class TradingBot:
                             preco_alvo = Decimal(str(camada['preco_alvo']))
 
                             if preco_atual <= preco_alvo and str(preco_alvo) not in oportunidades_usadas:
-                                logger.info(f"🚨 OPORTUNIDADE EXTREMA (Camada {preco_alvo}) DETECTADA!")
+                                self.logger.info(f"🚨 OPORTUNIDADE EXTREMA (Camada {preco_alvo}) DETECTADA!")
 
                                 percentual_a_usar = Decimal(str(camada['percentual_capital_usar']))
                                 capital_disponivel = self.gestao_capital.calcular_capital_disponivel()
@@ -1495,20 +1493,20 @@ class TradingBot:
                                 return # Sai após tratar a primeira oportunidade válida
 
                         # Se o loop terminar, nenhuma camada foi ativada
-                        logger.debug(f"🛡️ Exposição máxima atingida. Nenhuma nova camada de oportunidade ativada.")
+                        self.logger.debug(f"🛡️ Exposição máxima atingida. Nenhuma nova camada de oportunidade ativada.")
 
                     else:
                         # Se a exposição voltar ao normal, reativa as notificações e a lógica de compra
                         if self.notificou_exposicao_maxima:
-                            logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                            logger.info(f"✅ Exposição de capital normalizada ({alocacao_atual_ada:.1f}%). Compras normais reativadas.")
-                            logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                            self.logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                            self.logger.info(f"✅ Exposição de capital normalizada ({alocacao_atual_ada:.1f}%). Compras normais reativadas.")
+                            self.logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
                             self.notificou_exposicao_maxima = False
                         
                         # Limpa o estado das oportunidades usadas quando a exposição é normalizada
                         if self.state.get_state('oportunidades_extremas_usadas'):
                             self.state.set_state('oportunidades_extremas_usadas', [])
-                            logger.info("🔓 Camadas de oportunidade extrema rearmadas.")
+                            self.logger.info("🔓 Camadas de oportunidade extrema rearmadas.")
 
                         # ═══════════════════════════════════════════════════════════════
                         # ESTRATÉGIA: LARGADA A FRIO
@@ -1518,12 +1516,12 @@ class TradingBot:
                             degrau_profundo = self.encontrar_degrau_mais_profundo(queda_pct)
 
                             if degrau_profundo:
-                                logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                                logger.info("🥶 LARGADA A FRIO DETECTADA!")
-                                logger.info(f"   Queda desde SMA: {queda_pct:.2f}%")
-                                logger.info(f"   Degrau mais profundo ativado: Nível {degrau_profundo['nivel']}")
-                                logger.info(f"   Executando compra controlada no degrau {degrau_profundo['nivel']}")
-                                logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                                self.logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                                self.logger.info("🥶 LARGADA A FRIO DETECTADA!")
+                                self.logger.info(f"   Queda desde SMA: {queda_pct:.2f}%")
+                                self.logger.info(f"   Degrau mais profundo ativado: Nível {degrau_profundo['nivel']}")
+                                self.logger.info(f"   Executando compra controlada no degrau {degrau_profundo['nivel']}")
+                                self.logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
                                 # CORREÇÃO CRÍTICA: Marcar como tratada ANTES da compra
                                 # Isso evita loop infinito se a compra falhar por falta de capital
@@ -1534,19 +1532,19 @@ class TradingBot:
 
                                 # Executar APENAS UMA compra no degrau mais profundo
                                 if self.executar_compra(degrau_profundo, preco_atual, saldos['usdt']):
-                                    logger.info("✅ Compra de 'Largada a Frio' executada!")
-                                    logger.info("   🕒 Cooldown global ativado")
+                                    self.logger.info("✅ Compra de 'Largada a Frio' executada!")
+                                    self.logger.info("   🕒 Cooldown global ativado")
                                     compra_executada = True
 
                                     # Aguardar 10 segundos após compra
                                     time.sleep(10)
                                 else:
-                                    logger.info("⚠️ Compra de 'Largada a Frio' não executada (sem capital disponível)")
-                                    logger.info("   Bot continuará em modo normal")
+                                    self.logger.info("⚠️ Compra de 'Largada a Frio' não executada (sem capital disponível)")
+                                    self.logger.info("   Bot continuará em modo normal")
                             else:
                                 # Nenhum degrau ativado - continuar normalmente
                                 self.primeira_execucao = False
-                                logger.debug("Primeira execução, mas nenhum degrau ativado")
+                                self.logger.debug("Primeira execução, mas nenhum degrau ativado")
 
                         # ═══════════════════════════════════════════════════════════════
                         # ESTRATÉGIA NORMAL: Tentar comprar em degraus com cooldown duplo
@@ -1580,19 +1578,19 @@ class TradingBot:
                                         # DESBLOQUEADO: Remover do set se estava bloqueado
                                         if nivel_degrau in self.degraus_notificados_bloqueados:
                                             self.degraus_notificados_bloqueados.remove(nivel_degrau)
-                                            logger.info(f"🔓 Degrau {nivel_degrau} desbloqueado")
+                                            self.logger.info(f"🔓 Degrau {nivel_degrau} desbloqueado")
 
                                         # ANTI-SPAM: Só loga "Degrau X ativado" 1x a cada 5 minutos
                                         agora = datetime.now()
                                         ultima_log = self.ultima_tentativa_log_degrau.get(nivel_degrau)
 
                                         if ultima_log is None or (agora - ultima_log) >= timedelta(minutes=5):
-                                            logger.info(f"🎯 Degrau {nivel_degrau} ativado! Queda: {queda_pct:.2f}%")
+                                            self.logger.info(f"🎯 Degrau {nivel_degrau} ativado! Queda: {queda_pct:.2f}%")
                                             self.ultima_tentativa_log_degrau[nivel_degrau] = agora
 
                                         # Tentar executar compra
                                         if self.executar_compra(degrau, preco_atual, saldos['usdt']):
-                                            logger.info("✅ Compra executada com sucesso!")
+                                            self.logger.info("✅ Compra executada com sucesso!")
                                             compra_executada = True
 
                                             # Aguardar 10 segundos após compra
@@ -1603,16 +1601,16 @@ class TradingBot:
                                         if nivel_degrau not in self.degraus_notificados_bloqueados:
                                             self.degraus_notificados_bloqueados.add(nivel_degrau)
                                             if motivo_bloqueio and motivo_bloqueio.startswith('cooldown_global'):
-                                                logger.debug(f"🕒 Cooldown global ativo ({motivo_bloqueio})")
+                                                self.logger.debug(f"🕒 Cooldown global ativo ({motivo_bloqueio})")
                                             elif motivo_bloqueio and motivo_bloqueio.startswith('cooldown_degrau'):
-                                                logger.debug(f"🕒 Degrau {nivel_degrau} em cooldown ({motivo_bloqueio})")
+                                                self.logger.debug(f"🕒 Degrau {nivel_degrau} em cooldown ({motivo_bloqueio})")
 
                                     # Se não pode comprar neste degrau (cooldown), tenta o próximo
                                 else:
                                     # Uma das condições não foi atendida - ignorar degrau
                                     if condicao_sma_ok and not condicao_melhora_pm_ok:
                                         # Degrau ativo pela SMA, mas preço não melhora suficiente o PM
-                                        logger.debug(
+                                        self.logger.debug(
                                             f"📊 Degrau {degrau['nivel']}: SMA OK ({queda_pct:.2f}%), mas preço ${preco_atual:.6f} "
                                             f"não melhora PM (${self.preco_medio_compra:.6f}) em {settings.PERCENTUAL_MINIMO_MELHORA_PM}%"
                                         )
@@ -1627,18 +1625,18 @@ class TradingBot:
                         meta = self.encontrar_meta_ativa(lucro_atual, saldos['ada'], preco_atual)
 
                         if meta:
-                            logger.info(f"🎯 Meta {meta['meta']} atingida! Lucro: +{lucro_atual:.2f}%")
+                            self.logger.info(f"🎯 Meta {meta['meta']} atingida! Lucro: +{lucro_atual:.2f}%")
 
                             # Tentar executar venda
                             if self.executar_venda(meta, preco_atual, saldos['ada']):
-                                logger.info("✅ Venda executada com lucro!")
+                                self.logger.info("✅ Venda executada com lucro!")
 
                                 # Aguardar 10 segundos após venda
                                 time.sleep(10)
                     else:
                         # Log informativo a cada 20 ciclos (≈ 2 minutos) quando não há lucro
                         if contador_ciclos % 20 == 0 and lucro_atual is not None:
-                            logger.info(f"🛡️ Aguardando lucro (atual: {lucro_atual:+.2f}% | preço médio: ${self.preco_medio_compra:.6f})")
+                            self.logger.info(f"🛡️ Aguardando lucro (atual: {lucro_atual:+.2f}% | preço médio: ${self.preco_medio_compra:.6f})")
 
                 # ═══════════════════════════════════════════════════════════════════
                 # VERIFICAR RECOMPRAS DE SEGURANÇA
@@ -1657,7 +1655,7 @@ class TradingBot:
                 if saldos['usdt'] >= Decimal('5.0'):
                     resultado_bnb = self.gerenciador_bnb.verificar_e_comprar_bnb(saldos['usdt'])
                     if resultado_bnb.get('sucesso') and resultado_bnb.get('precisa_comprar'):
-                        logger.info(f"💎 BNB: {resultado_bnb['mensagem']}")
+                        self.logger.info(f"💎 BNB: {resultado_bnb['mensagem']}")
 
                 # Fazer backup do banco de dados (1x por dia)
                 self.fazer_backup_periodico()
@@ -1671,14 +1669,14 @@ class TradingBot:
                 time.sleep(5)
 
         except KeyboardInterrupt:
-            logger.warning("\n⚠️ Bot interrompido pelo usuário")
+            self.logger.warning("\n⚠️ Bot interrompido pelo usuário")
             self.rodando = False
         except Exception as e:
-            logger.error(f"❌ Erro fatal no loop principal: {e}")
-            logger.exception("Traceback:")
+            self.logger.error(f"❌ Erro fatal no loop principal: {e}")
+            self.logger.exception("Traceback:")
             self.rodando = False
 
-        logger.banner("🛑 BOT FINALIZADO")
+        self.logger.banner("🛑 BOT FINALIZADO")
 
 
 def main():

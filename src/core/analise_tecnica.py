@@ -5,9 +5,9 @@ from decimal import Decimal
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 
-from src.utils.logger import get_logger
+from src.utils.logger import get_loggers
 
-logger = get_logger()
+logger, _ = get_loggers()
 
 
 class AnaliseTecnica:

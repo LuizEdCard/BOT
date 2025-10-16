@@ -16,10 +16,10 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from config.settings import settings
-from src.utils.logger import get_logger
+from src.utils.logger import get_loggers
 
 # Logger usa configuração padrão (não precisa especificar nível)
-logger = get_logger(
+logger, _ = get_loggers(
     log_dir=Path('logs'),
     console=True
 )

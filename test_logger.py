@@ -12,14 +12,14 @@ from pathlib import Path
 # Adicionar diretório src ao path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.utils.logger import get_logger
+from src.utils.logger import get_loggers
 
 
 def testar_logger():
     """Testa todas as funcionalidades do logger"""
 
     # Criar logger
-    logger = get_logger(
+    logger, _ = get_loggers(
         nome='TestLogger',
         log_dir=Path(__file__).parent / 'logs',
         nivel='DEBUG',

@@ -10,10 +10,10 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Optional, Dict, List, Any
 import shutil
-from src.utils.logger import get_logger
+from src.utils.logger import get_loggers
 from src.utils.conversoes import decimal_para_float
 
-logger = get_logger()
+logger, _ = get_loggers()
 
 
 class DatabaseManager:

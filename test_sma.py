@@ -10,9 +10,9 @@ from decimal import Decimal
 from config.settings import settings
 from src.comunicacao.api_manager import APIManager
 from src.core.analise_tecnica import AnaliseTecnica
-from src.utils.logger import get_logger
+from src.utils.logger import get_loggers
 
-logger = get_logger(log_dir=Path('logs'), nivel='INFO', console=True)
+logger, _ = get_loggers(log_dir=Path('logs'), nivel='INFO', console=True)
 
 
 def main():
