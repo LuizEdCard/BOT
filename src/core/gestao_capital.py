@@ -15,7 +15,6 @@ import sys
 # Adicionar path do projeto
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from config.settings import settings
 from src.utils.logger import get_loggers
 
 # Logger usa configuração padrão (não precisa especificar nível)
@@ -35,17 +34,18 @@ class GestaoCapital:
     - Capital ativo: 92% disponível para trading
     """
 
-    def __init__(self, saldo_usdt: Decimal = Decimal('0'), valor_posicao_ada: Decimal = Decimal('0')):
+    def __init__(self, saldo_usdt: Decimal = Decimal('0'), valor_posicao_ada: Decimal = Decimal('0'), percentual_reserva: Decimal = Decimal('8')):
         """
         Inicializar gestor de capital
 
         Args:
             saldo_usdt: Saldo atual em USDT
             valor_posicao_ada: Valor da posição em ADA (em USDT)
+            percentual_reserva: Percentual da reserva (padrão: 8%)
         """
         self.saldo_usdt = saldo_usdt
         self.valor_posicao_ada = valor_posicao_ada
-        self.percentual_reserva = Decimal(str(settings.PERCENTUAL_RESERVA)) / Decimal('100')
+        self.percentual_reserva = percentual_reserva / Decimal('100')
         self.saldo_minimo = Decimal('5.00')
 
     def atualizar_saldos(self, saldo_usdt: Decimal, valor_posicao_ada: Decimal = Decimal('0')):

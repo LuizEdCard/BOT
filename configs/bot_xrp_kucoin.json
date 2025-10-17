@@ -1,0 +1,56 @@
+{
+  "nome_instancia": "XRP-KuCoin",
+  "exchange": "kucoin",
+  "par": "XRP/USDT",
+  "api_key_env": "KUCOIN_API_KEY",
+  "api_secret_env": "KUCOIN_API_SECRET",
+  "api_passphrase_env": "KUCOIN_API_PASSPHRASE",
+  "BOT_NAME": "XRP_Kucoin_Bot",
+  "DATABASE_PATH": "dados/kucoin_trades.db",
+  "BACKUP_DIR": "dados/backups/xrp_kucoin",
+  "STATE_FILE_PATH": "dados/kucoin_state.json",
+  "AMBIENTE": "PRODUCAO",
+  "CAPITAL_INICIAL": 50.0,
+  "PERCENTUAL_RESERVA": 8.0,
+  "COOLDOWN_GLOBAL_APOS_COMPRA_MINUTOS": 30,
+  "PERCENTUAL_MINIMO_MELHORA_PM": 3.0,
+  "VALOR_MINIMO_ORDEM": 5.0,
+  "GESTAO_DE_RISCO": {
+    "exposicao_maxima_percentual_capital": 90.0,
+    "compras_de_oportunidade_extrema": [
+      { "preco_alvo": 0.45, "percentual_capital_usar": 30 },
+      { "preco_alvo": 0.40, "percentual_capital_usar": 50 }
+    ]
+  },
+  "APORTES": {
+    "habilitado": false
+  },
+  "DEGRAUS_COMPRA": [
+    {
+      "nivel": 1,
+      "queda_percentual": 2.5,
+      "quantidade_xrp": 10.0,
+      "intervalo_horas": 1.5
+    },
+    {
+      "nivel": 2,
+      "queda_percentual": 5.0,
+      "quantidade_xrp": 15.0,
+      "intervalo_horas": 3
+    }
+  ],
+  "METAS_VENDA": [
+    { "meta": 1, "lucro_percentual": 6, "percentual_venda": 30 },
+    { "meta": 2, "lucro_percentual": 11, "percentual_venda": 40 },
+    { "meta": 3, "lucro_percentual": 18, "percentual_venda": 30 }
+  ],
+  "VENDAS_DE_SEGURANCA": [
+    {
+      "nome": "Seguranca Pre-Meta1",
+      "gatilho_ativacao_lucro_pct": 4.5,
+      "gatilho_venda_reversao_pct": 1.0,
+      "percentual_venda_posicao": 15,
+      "gatilho_recompra_drop_pct": 2.5
+    }
+  ]
+}

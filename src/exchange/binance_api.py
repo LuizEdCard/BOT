@@ -360,3 +360,98 @@ class BinanceAPI(ExchangeAPI):
         except Exception as e:
             logger.erro_api(f'obter_klines/{simbolo}/{intervalo}', str(e))
             return []
+
+    def importar_historico_para_db(self, database_manager, par: str):
+        """
+        Sincroniza histórico de trades dos últimos 60 dias com o banco de dados local.
+        
+        Este método é chamado quando há uma divergência significativa entre o saldo
+        da exchange e o saldo registrado no banco de dados local.
+        
+        IMPORTANTE: Este método NÃO apaga dados antigos. Ele apenas sincroniza
+        os últimos 60 dias, mantendo ordens mais antigas intactas e evitando duplicações.
+        
+        Args:
+            database_manager: Instância do DatabaseManager
+            par: Par de trading (ex: 'ADA/USDT')
+        """
+        try:
+            binance_symbol = par.replace('/', '').upper()
+            logger.info(f"🔄 Iniciando sincronização de histórico da Binance para {binance_symbol}...")
+            
+            # Calcular timestamp de 60 dias atrás (em milissegundos)
+            from datetime import datetime, timedelta
+            inicio_timestamp = int((datetime.now() - timedelta(days=60)).timestamp() * 1000)
+            inicio_data_str = datetime.fromtimestamp(inicio_timestamp / 1000).isoformat()
+            
+            # Buscar histórico de ordens dos últimos 60 dias
+            logger.info(f"📥 Buscando ordens dos últimos 60 dias da exchange...")
+            historico_ordens = self.get_historico_ordens(par=par, limite=1000)
+            
+            # Filtrar apenas ordens FILLED (executadas) dos últimos 60 dias
+            ordens_recentes = [
+                ordem for ordem in historico_ordens
+                if ordem.get('status') == 'FILLED' and ordem.get('time', 0) >= inicio_timestamp
+            ]
+            
+            logger.info(f"📋 Encontradas {len(ordens_recentes)} ordens executadas nos últimos 60 dias na exchange")
+            
+            if not ordens_recentes:
+                logger.warning("⚠️ Nenhuma ordem encontrada no histórico da exchange")
+                return
+            
+            # SINCRONIZAÇÃO INTELIGENTE:
+            # 1. Apagar APENAS ordens dos últimos 60 dias do banco local
+            # 2. Manter ordens mais antigas intactas
+            logger.info(f"🗑️ Removendo ordens dos últimos 60 dias do banco local (>= {inicio_data_str[:10]})...")
+            logger.info("📌 Ordens mais antigas serão preservadas")
+            
+            with database_manager._conectar() as conn:
+                cursor = conn.cursor()
+                
+                # Contar ordens que serão removidas
+                cursor.execute("""
+                    SELECT COUNT(*) FROM ordens 
+                    WHERE timestamp >= ?
+                """, (inicio_data_str,))
+                total_remover = cursor.fetchone()[0]
+                
+                # Contar ordens antigas que serão mantidas
+                cursor.execute("""
+                    SELECT COUNT(*) FROM ordens 
+                    WHERE timestamp < ?
+                """, (inicio_data_str,))
+                total_manter = cursor.fetchone()[0]
+                
+                logger.info(f"   • Ordens a remover (últimos 60 dias): {total_remover}")
+                logger.info(f"   • Ordens a preservar (> 60 dias): {total_manter}")
+                
+                # Apagar apenas ordens dos últimos 60 dias
+                cursor.execute("""
+                    DELETE FROM ordens 
+                    WHERE timestamp >= ?
+                """, (inicio_data_str,))
+                
+                logger.info("✅ Ordens recentes removidas, histórico antigo preservado")
+            
+            # Importar ordens do histórico da exchange (últimos 60 dias)
+            logger.info(f"📥 Importando {len(ordens_recentes)} ordens da exchange...")
+            resultado = database_manager.importar_ordens_binance(
+                ordens_binance=ordens_recentes,
+                recalcular_preco_medio=True
+            )
+            
+            logger.info(f"✅ Sincronização concluída:")
+            logger.info(f"   • Importadas: {resultado['importadas']}")
+            logger.info(f"   • Duplicadas: {resultado['duplicadas']}")
+            logger.info(f"   • Erros: {resultado['erros']}")
+            logger.info(f"   • Histórico antigo preservado: {total_manter} ordens")
+            
+            if resultado['erros'] > 0:
+                logger.warning(f"⚠️ {resultado['erros']} ordens não puderam ser importadas")
+            
+        except Exception as e:
+            logger.error(f"❌ Erro ao sincronizar histórico da Binance: {e}")
+            import traceback
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            raise

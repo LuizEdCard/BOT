@@ -1,0 +1,9 @@
+{
+  "bots_ativos": ["ada_bot","bot_xrp_kucoin"],
+  "configuracao_global": {
+    "log_level": "INFO",
+    "backup_enabled": true,
+    "database_path": "dados/bot_trading.db",
+    "backup_dir": "dados/backup"
+  }
+}

@@ -26,11 +26,15 @@ class GerenciadorAportes:
         """
         Args:
             api_manager: Instância do APIManager
-            settings: Configurações do sistema
+            settings: Configurações do sistema (dict ou objeto)
         """
         self.api = api_manager
         self.settings = settings
-        self.aportes_config = settings.APORTES
+        # Support both dict and object config
+        if isinstance(settings, dict):
+            self.aportes_config = settings.get('APORTES', {})
+        else:
+            self.aportes_config = settings.APORTES
 
     def verificar_saldo_brl(self) -> Decimal:
         """
@@ -40,19 +44,13 @@ class GerenciadorAportes:
             Decimal: Saldo BRL disponível
         """
         try:
-            saldos = self.api.obter_saldos()
-            saldo_brl = Decimal('0')
-
-            for saldo in saldos:
-                if saldo['asset'] == 'BRL':
-                    saldo_brl = Decimal(str(saldo['free']))
-                    break
-
+            # Use get_saldo_disponivel method from BinanceAPI
+            saldo_brl = Decimal(str(self.api.get_saldo_disponivel('BRL')))
             logger.info(f"💰 Saldo BRL detectado: R$ {saldo_brl:.2f}")
             return saldo_brl
 
         except Exception as e:
-            logger.erro_api(f"Erro ao verificar saldo BRL: {e}")
+            logger.erro_api("verificar_saldo_brl", f"Erro ao verificar saldo BRL: {e}")
             return Decimal('0')
 
     def verificar_saldo_usdt(self) -> Decimal:
@@ -63,19 +61,13 @@ class GerenciadorAportes:
             Decimal: Saldo USDT disponível
         """
         try:
-            saldos = self.api.obter_saldos()
-            saldo_usdt = Decimal('0')
-
-            for saldo in saldos:
-                if saldo['asset'] == 'USDT':
-                    saldo_usdt = Decimal(str(saldo['free']))
-                    break
-
+            # Use get_saldo_disponivel method from BinanceAPI
+            saldo_usdt = Decimal(str(self.api.get_saldo_disponivel('USDT')))
             logger.info(f"💵 Saldo USDT detectado: $ {saldo_usdt:.2f}")
             return saldo_usdt
 
         except Exception as e:
-            logger.erro_api(f"Erro ao verificar saldo USDT: {e}")
+            logger.erro_api("verificar_saldo_usdt", f"Erro ao verificar saldo USDT: {e}")
             return Decimal('0')
 
     def obter_preco_usdt_brl(self) -> Optional[Decimal]:
@@ -87,14 +79,13 @@ class GerenciadorAportes:
             None: Se houver erro
         """
         try:
-            ticker = self.api.obter_ticker('USDTBRL')
-            preco = Decimal(str(ticker['price']))
-
+            # Use get_preco_atual method from BinanceAPI
+            preco = Decimal(str(self.api.get_preco_atual('USDT/BRL')))
             logger.info(f"📊 Cotação USDT/BRL: R$ {preco:.4f}")
             return preco
 
         except Exception as e:
-            logger.erro_api(f"Erro ao obter preço USDT/BRL: {e}")
+            logger.erro_api("obter_preco_usdt_brl", f"Erro ao obter preço USDT/BRL: {e}")
             return None
 
     def calcular_quantidade_usdt(self, valor_brl: Decimal, preco_usdt_brl: Decimal) -> Decimal:
@@ -181,9 +172,9 @@ class GerenciadorAportes:
             # Converter para float garantindo 1 casa decimal
             qtd_float = round(float(quantidade_usdt), 1)
 
-            ordem = self.api.criar_ordem_mercado(
-                simbolo='USDTBRL',
-                lado='BUY',  # Comprar USDT
+            # Use place_ordem_compra_market method from BinanceAPI
+            ordem = self.api.place_ordem_compra_market(
+                par='USDT/BRL',
                 quantidade=qtd_float
             )
 
@@ -210,7 +201,7 @@ class GerenciadorAportes:
                 }
 
         except Exception as e:
-            logger.erro_api(f"Erro ao converter BRL → USDT: {e}")
+            logger.erro_api("converter_brl_para_usdt", f"Erro ao converter BRL → USDT: {e}")
             return {
                 'sucesso': False,
                 'mensagem': f"Exceção: {str(e)}"
@@ -267,19 +258,10 @@ class GerenciadorAportes:
             }
         """
         try:
-            saldos = self.api.obter_saldos()
-
-            saldo_brl = Decimal('0')
-            saldo_usdt = Decimal('0')
-            saldo_ada = Decimal('0')
-
-            for saldo in saldos:
-                if saldo['asset'] == 'BRL':
-                    saldo_brl = Decimal(str(saldo['free']))
-                elif saldo['asset'] == 'USDT':
-                    saldo_usdt = Decimal(str(saldo['free']))
-                elif saldo['asset'] == 'ADA':
-                    saldo_ada = Decimal(str(saldo['free']))
+            # Use individual balance calls instead of obter_saldos()
+            saldo_brl = Decimal(str(self.api.get_saldo_disponivel('BRL')))
+            saldo_usdt = Decimal(str(self.api.get_saldo_disponivel('USDT')))
+            saldo_ada = Decimal(str(self.api.get_saldo_disponivel('ADA')))
 
             # Calcular total em USDT equivalente
             total_usdt = saldo_usdt
@@ -292,8 +274,7 @@ class GerenciadorAportes:
 
             # Converter ADA para USDT equivalente
             if saldo_ada > 0:
-                ticker_ada = self.api.obter_ticker('ADAUSDT')
-                preco_ada = Decimal(str(ticker_ada['price']))
+                preco_ada = Decimal(str(self.api.get_preco_atual('ADA/USDT')))
                 total_usdt += (saldo_ada * preco_ada)
 
             resumo = {
@@ -314,7 +295,7 @@ class GerenciadorAportes:
             return resumo
 
         except Exception as e:
-            logger.erro_api(f"Erro ao obter resumo de saldos: {e}")
+            logger.erro_api("obter_resumo_saldos", f"Erro ao obter resumo de saldos: {e}")
             return {
                 'brl': Decimal('0'),
                 'usdt': Decimal('0'),

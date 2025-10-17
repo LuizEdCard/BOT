@@ -1,0 +1,33 @@
+{
+  "nome_instancia": "ADA_USDT_Bot",
+  "exchange": "binance",
+  "par": "ADA/USDT",
+  "api_key_env": "BINANCE_API_KEY",
+  "api_secret_env": "BINANCE_API_SECRET",
+  "BOT_NAME": "ADA_Bot",
+  "DATABASE_PATH": "dados/bot_trading.db",
+  "BACKUP_DIR": "dados/backup",
+  "STATE_FILE_PATH": "dados/bot_state.json",
+  "AMBIENTE": "producao",
+  "CAPITAL_INICIAL": 100.0,
+  "PERCENTUAL_RESERVA": 8,
+  "COOLDOWN_GLOBAL_APOS_COMPRA_MINUTOS": 30,
+  "PERCENTUAL_MINIMO_MELHORA_PM": 2.0,
+  "VALOR_MINIMO_ORDEM": 5.0,
+  "GESTAO_DE_RISCO": {
+    "exposicao_maxima_percentual_capital": 70.0,
+    "compras_de_oportunidade_extrema": [
+      { "preco_alvo": 0.65, "percentual_capital_usar": 30 },
+      { "preco_alvo": 0.60, "percentual_capital_usar": 20 },
+      { "preco_alvo": 0.55, "percentual_capital_usar": 50 }
+    ]
+  },
+  "APORTES": {
+    "habilitado": true,
+    "intervalo_verificacao_minutos": 30,
+    "valor_minimo_brl_para_converter": 50.0
+  },
+  "DEGRAUS_COMPRA": [],
+  "METAS_VENDA": [],
+  "VENDAS_DE_SEGURANCA": []
+}

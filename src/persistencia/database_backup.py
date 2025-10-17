@@ -90,111 +90,111 @@ class DatabaseManager:
         with self._conectar() as conn:
             cursor = conn.cursor()
 
-            # Tabela de ordens (compras e vendas)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS ordens (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    tipo TEXT NOT NULL,  -- 'COMPRA' ou 'VENDA'
-                    par TEXT NOT NULL,   -- 'ADA/USDT'
-                    quantidade REAL NOT NULL,
-                    preco REAL NOT NULL,
-                    valor_total REAL NOT NULL,
-                    taxa REAL NOT NULL,
-                    meta TEXT,  -- 'adaptativa', 'meta1', 'meta2', 'meta3', 'degrau1', etc
-                    lucro_percentual REAL,
-                    lucro_usdt REAL,
-                    preco_medio_antes REAL,
-                    preco_medio_depois REAL,
-                    saldo_ada_antes REAL,
-                    saldo_ada_depois REAL,
-                    saldo_usdt_antes REAL,
-                    saldo_usdt_depois REAL,
-                    order_id TEXT,  -- ID da ordem na Binance
-                    observacao TEXT
-                )
-            """)
+        # Tabela de ordens (compras e vendas)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ordens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                tipo TEXT NOT NULL,  -- 'COMPRA' ou 'VENDA'
+                par TEXT NOT NULL,   -- 'ADA/USDT'
+                quantidade REAL NOT NULL,
+                preco REAL NOT NULL,
+                valor_total REAL NOT NULL,
+                taxa REAL NOT NULL,
+                meta TEXT,  -- 'adaptativa', 'meta1', 'meta2', 'meta3', 'degrau1', etc
+                lucro_percentual REAL,
+                lucro_usdt REAL,
+                preco_medio_antes REAL,
+                preco_medio_depois REAL,
+                saldo_ada_antes REAL,
+                saldo_ada_depois REAL,
+                saldo_usdt_antes REAL,
+                saldo_usdt_depois REAL,
+                order_id TEXT,  -- ID da ordem na Binance
+                observacao TEXT
+            )
+        """)
 
-            # Tabela de saldos (snapshot periódico)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS saldos (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    ada_livre REAL NOT NULL,
-                    ada_bloqueado REAL NOT NULL,
-                    ada_total REAL NOT NULL,
-                    usdt_livre REAL NOT NULL,
-                    usdt_bloqueado REAL NOT NULL,
-                    usdt_total REAL NOT NULL,
-                    bnb_livre REAL,
-                    bnb_bloqueado REAL,
-                    bnb_total REAL,
-                    valor_total_usdt REAL,
-                    preco_ada REAL
-                )
-            """)
+        # Tabela de saldos (snapshot periódico)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS saldos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                ada_livre REAL NOT NULL,
+                ada_bloqueado REAL NOT NULL,
+                ada_total REAL NOT NULL,
+                usdt_livre REAL NOT NULL,
+                usdt_bloqueado REAL NOT NULL,
+                usdt_total REAL NOT NULL,
+                bnb_livre REAL,
+                bnb_bloqueado REAL,
+                bnb_total REAL,
+                valor_total_usdt REAL,
+                preco_ada REAL
+            )
+        """)
 
-            # Tabela de preços (histórico)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS precos (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    par TEXT NOT NULL,
-                    preco REAL NOT NULL,
-                    sma_20 REAL,
-                    sma_50 REAL
-                )
-            """)
+        # Tabela de preços (histórico)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS precos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                par TEXT NOT NULL,
+                preco REAL NOT NULL,
+                sma_20 REAL,
+                sma_50 REAL
+            )
+        """)
 
-            # Tabela de métricas de performance
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS metricas (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    total_compras INTEGER NOT NULL,
-                    total_vendas INTEGER NOT NULL,
-                    volume_comprado REAL NOT NULL,
-                    volume_vendido REAL NOT NULL,
-                    lucro_realizado REAL NOT NULL,
-                    taxa_total REAL NOT NULL,
-                    roi_percentual REAL,
-                    maior_lucro REAL,
-                    menor_lucro REAL,
-                    lucro_medio REAL,
-                    trades_lucrativos INTEGER,
-                    trades_totais INTEGER
-                )
-            """)
+        # Tabela de métricas de performance
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS metricas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                total_compras INTEGER NOT NULL,
+                total_vendas INTEGER NOT NULL,
+                volume_comprado REAL NOT NULL,
+                volume_vendido REAL NOT NULL,
+                lucro_realizado REAL NOT NULL,
+                taxa_total REAL NOT NULL,
+                roi_percentual REAL,
+                maior_lucro REAL,
+                menor_lucro REAL,
+                lucro_medio REAL,
+                trades_lucrativos INTEGER,
+                trades_totais INTEGER
+            )
+        """)
 
-            # Tabela de conversões BNB
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS conversoes_bnb (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    quantidade_bnb REAL NOT NULL,
-                    valor_usdt REAL NOT NULL,
-                    preco_bnb REAL NOT NULL,
-                    saldo_bnb_antes REAL NOT NULL,
-                    saldo_bnb_depois REAL NOT NULL,
-                    saldo_usdt_antes REAL NOT NULL,
-                    saldo_usdt_depois REAL NOT NULL,
-                    order_id TEXT
-                )
-            """)
+        # Tabela de conversões BNB
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS conversoes_bnb (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                quantidade_bnb REAL NOT NULL,
+                valor_usdt REAL NOT NULL,
+                preco_bnb REAL NOT NULL,
+                saldo_bnb_antes REAL NOT NULL,
+                saldo_bnb_depois REAL NOT NULL,
+                saldo_usdt_antes REAL NOT NULL,
+                saldo_usdt_depois REAL NOT NULL,
+                order_id TEXT
+            )
+        """)
 
-            # Tabela de estado do bot (para recuperação)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS estado_bot (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),  -- Apenas 1 registro
-                    timestamp_atualizacao TEXT NOT NULL,
-                    preco_medio_compra REAL,
-                    quantidade_total_ada REAL,
-                    ultima_compra TEXT,
-                    ultima_venda TEXT,
-                    cooldown_ativo INTEGER DEFAULT 0,
-                    bot_ativo INTEGER DEFAULT 1
-                )
-            """)
+        # Tabela de estado do bot (para recuperação)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS estado_bot (
+                id INTEGER PRIMARY KEY CHECK (id = 1),  -- Apenas 1 registro
+                timestamp_atualizacao TEXT NOT NULL,
+                preco_medio_compra REAL,
+                quantidade_total_ada REAL,
+                ultima_compra TEXT,
+                ultima_venda TEXT,
+                cooldown_ativo INTEGER DEFAULT 0,
+                bot_ativo INTEGER DEFAULT 1
+            )
+        """)
 
             # Criar índices para melhorar performance de queries
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_ordens_timestamp ON ordens(timestamp)")
@@ -447,6 +447,8 @@ class DatabaseManager:
                 metricas['trades_totais']
             ))
 
+
+
     def obter_ultimas_ordens(self, limite: int = 10) -> List[Dict[str, Any]]:
         """Retorna as últimas N ordens."""
         with self._conectar() as conn:
@@ -496,6 +498,8 @@ class DatabaseManager:
                 dados.get('order_id')
             ))
 
+
+
     def ordem_ja_existe(self, order_id: str) -> bool:
         """Verifica se uma ordem já está no banco de dados."""
         with self._conectar() as conn:
@@ -517,20 +521,19 @@ class DatabaseManager:
         Returns:
             Dicionário com estatísticas da importação
         """
-        importadas = 0
-        duplicadas = 0
-        erros = 0
-        
         with self._conectar() as conn:
             cursor = conn.cursor()
+
+            importadas = 0
+            duplicadas = 0
+            erros = 0
 
             for ordem in ordens_binance:
                 try:
                     order_id = str(ordem.get('orderId'))
 
-                    # Verificar se já existe (dentro da mesma transação)
-                    cursor.execute("SELECT COUNT(*) FROM ordens WHERE order_id = ?", (order_id,))
-                    if cursor.fetchone()[0] > 0:
+                    # Verificar se já existe
+                    if self.ordem_ja_existe(order_id):
                         duplicadas += 1
                         continue
 
@@ -571,17 +574,17 @@ class DatabaseManager:
                 except Exception as e:
                     logger.error(f"Erro ao importar ordem {ordem.get('orderId')}: {e}")
                     erros += 1
-        
-        # Recalcular preço médio DEPOIS de fechar a conexão anterior
-        if recalcular_preco_medio and importadas > 0:
-            self._recalcular_preco_medio_historico()
 
-        return {
-            'importadas': importadas,
-            'duplicadas': duplicadas,
-            'erros': erros,
-            'total_processadas': len(ordens_binance)
-        }
+            # Recalcular preço médio baseado nas ordens importadas
+            if recalcular_preco_medio and importadas > 0:
+                self._recalcular_preco_medio_historico()
+
+            return {
+                'importadas': importadas,
+                'duplicadas': duplicadas,
+                'erros': erros,
+                'total_processadas': len(ordens_binance)
+            }
 
     def _recalcular_preco_medio_historico(self):
         """
