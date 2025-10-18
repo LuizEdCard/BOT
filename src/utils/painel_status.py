@@ -136,12 +136,13 @@ class PainelStatus:
             dados: Dicionário com todos os dados necessários:
                 - preco_atual: Decimal
                 - sma_28: Decimal
-                - quantidade_ada: Decimal
+                - quantidade_ada: Decimal (quantidade do ativo base)
                 - preco_medio: Decimal
                 - saldo_usdt: Decimal
                 - reserva: Decimal
                 - capital_total: Decimal
                 - stats_24h: Dict com 'compras', 'vendas', 'lucro_realizado'
+                - base_currency: str (ex: 'ADA', 'XRP', 'BTC')
         """
         # Atualizar timestamp
         self.ultima_exibicao = time.time()
@@ -157,6 +158,7 @@ class PainelStatus:
         reserva = float(dados['reserva'])
         capital_total = float(dados['capital_total'])
         stats_24h = dados.get('stats_24h', {})
+        base_currency = dados.get('base_currency', 'ADA')  # Default para retrocompatibilidade
 
         # Calcular métricas
         if sma_28 > 0:
@@ -194,9 +196,9 @@ class PainelStatus:
 
         if quantidade_ada > 0:
             self.logger.info(
-                f"│ {Icones.POSICAO} POSIÇÃO  │ {quantidade_ada:.1f} ADA @ ${preco_medio:.6f} | "
+                f"│ {Icones.POSICAO} POSIÇÃO  │ {quantidade_ada:.1f} {base_currency} @ ${preco_medio:.6f} | "
                 f"{sinal_lucro}{lucro_pct:.2f}%"
-                + " " * (largura - len(f"│ {Icones.POSICAO} POSIÇÃO  │ {quantidade_ada:.1f} ADA @ ${preco_medio:.6f} | {sinal_lucro}{lucro_pct:.2f}%")) + "│"
+                + " " * (largura - len(f"│ {Icones.POSICAO} POSIÇÃO  │ {quantidade_ada:.1f} {base_currency} @ ${preco_medio:.6f} | {sinal_lucro}{lucro_pct:.2f}%")) + "│"
             )
         else:
             self.logger.info(

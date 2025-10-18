@@ -1,6 +1,6 @@
 from functools import wraps
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from src.core.bot_worker import BotWorker
 
 def restricted_access(func):
@@ -74,6 +74,81 @@ class TelegramBot:
         
         response = "\n\n".join(full_status_message)
         await update.message.reply_text(response, parse_mode='Markdown')
+
+    @restricted_access
+    async def saldo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Exibe os saldos dos bots.
+
+        Uso: /saldo [nome_do_bot] ou /saldo (modo interativo)
+        """
+        if context.args and len(context.args) > 0:
+            nome_bot = " ".join(context.args)
+            if nome_bot.upper() == 'TOTAL':
+                total_usdt = 0
+                total_posicao_usdt = 0
+                for worker in self.workers:
+                    status = worker.get_status_dict()
+                    total_usdt += status.get('saldo_disponivel_usdt', 0)
+                    total_posicao_usdt += status.get('status_posicao', {}).get('valor_total', 0)
+                
+                response = (
+                    f"💰 **Saldo Total Consolidado**\n\n"
+                    f"- **Valor em Posições:** ${total_posicao_usdt:.2f}\n"
+                    f"- **Saldo USDT Disponível:** ${total_usdt:.2f}\n"
+                    f"-----------------------------------\n"
+                    f"**Total Geral:** **${total_posicao_usdt + total_usdt:.2f}**"
+                )
+                await update.message.reply_text(response, parse_mode='Markdown')
+                return
+
+            bot_encontrado = None
+            for worker in self.workers:
+                if worker.config.get('nome_instancia') == nome_bot:
+                    bot_encontrado = worker
+                    break
+            
+            if bot_encontrado:
+                status = bot_encontrado.get_status_dict()
+                posicao = status.get('status_posicao', {})
+                response = (
+                    f"💰 **Saldo do Bot: {status.get('nome_instancia')} ({status.get('par')})**\n\n"
+                    f"- **Posição:** {posicao.get('quantidade', 0):.2f} {status.get('ativo_base', 'N/A')}\n"
+                    f"- **Valor da Posição:** ${posicao.get('valor_total', 0):.2f}\n"
+                    f"- **Saldo USDT Disponível:** ${status.get('saldo_disponivel_usdt', 0):.2f}"
+                )
+                await update.message.reply_text(response, parse_mode='Markdown')
+            else:
+                bots_disponiveis = [w.config.get('nome_instancia', 'N/A') for w in self.workers]
+                await update.message.reply_text(
+                    f"❌ Bot '{nome_bot}' não encontrado.\n\n"
+                    f"Bots disponíveis:\n" + "\n".join([f"• {b}" for b in bots_disponiveis])
+                )
+        else:
+            if not self.workers or len(self.workers) == 0:
+                await update.message.reply_text(
+                    "❌ Nenhum bot ativo encontrado."
+                )
+                return
+
+            keyboard = [
+                [InlineKeyboardButton(text="💰 Saldo Total Consolidado", callback_data="saldo:TOTAL")]
+            ]
+            for worker in self.workers:
+                nome = worker.config.get('nome_instancia', 'N/A')
+                par = worker.config.get('par', 'N/A')
+                button = InlineKeyboardButton(
+                    text=f"Saldo {nome} ({par})",
+                    callback_data=f"saldo:{nome}"
+                )
+                keyboard.append([button])
+
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(
+                "*Selecione o saldo que deseja consultar:*",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+
     
     @restricted_access
     async def pausar(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -189,37 +264,52 @@ class TelegramBot:
     async def crash(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Ativa o modo crash (compras agressivas) para um bot.
         
-        Uso: /crash [nome_do_bot]
+        Uso: /crash [nome_do_bot] ou /crash (modo interativo)
         """
-        if not context.args:
-            await update.message.reply_text(
-                "❌ Uso incorreto. Especifique o nome do bot.\n"
-                "Exemplo: /crash ADA"
-            )
-            return
-        
-        nome_bot = " ".join(context.args)
-        
-        # Procurar o bot na lista de workers
-        bot_encontrado = None
-        for worker in self.workers:
-            if worker.config.get('nome_instancia') == nome_bot:
-                bot_encontrado = worker
-                break
-        
-        if bot_encontrado:
-            bot_encontrado.command_queue.put({'comando': 'ativar_modo_crash'})
-            await update.message.reply_text(
-                f"💥 *MODO CRASH ATIVADO* para '{nome_bot}'\n\n"
-                f"⚠️ Compras agressivas liberadas!\n"
-                f"⚠️ Restrições de exposição e preço médio ignoradas.",
-                parse_mode='Markdown'
-            )
+        if context.args and len(context.args) > 0:
+            nome_bot = " ".join(context.args)
+            bot_encontrado = None
+            for worker in self.workers:
+                if worker.config.get('nome_instancia') == nome_bot:
+                    bot_encontrado = worker
+                    break
+            
+            if bot_encontrado:
+                bot_encontrado.command_queue.put({'comando': 'ativar_modo_crash'})
+                await update.message.reply_text(
+                    f"💥 *MODO CRASH ATIVADO* para '{nome_bot}'\n\n"
+                    f"⚠️ Compras agressivas liberadas!\n"
+                    f"⚠️ Restrições de exposição e preço médio ignoradas.",
+                    parse_mode='Markdown'
+                )
+            else:
+                bots_disponiveis = [w.config.get('nome_instancia', 'N/A') for w in self.workers]
+                await update.message.reply_text(
+                    f"❌ Bot '{nome_bot}' não encontrado.\n\n"
+                    f"Bots disponíveis:\n" + "\n".join([f"• {b}" for b in bots_disponiveis])
+                )
         else:
-            bots_disponiveis = [w.config.get('nome_instancia', 'N/A') for w in self.workers]
+            if not self.workers or len(self.workers) == 0:
+                await update.message.reply_text(
+                    "❌ Nenhum bot ativo encontrado."
+                )
+                return
+
+            keyboard = []
+            for worker in self.workers:
+                nome = worker.config.get('nome_instancia', 'N/A')
+                par = worker.config.get('par', 'N/A')
+                button = InlineKeyboardButton(
+                    text=f"💥 Ativar Crash {nome} ({par})",
+                    callback_data=f"crash:{nome}"
+                )
+                keyboard.append([button])
+
+            reply_markup = InlineKeyboardMarkup(keyboard)
             await update.message.reply_text(
-                f"❌ Bot '{nome_bot}' não encontrado.\n\n"
-                f"Bots disponíveis:\n" + "\n".join([f"• {b}" for b in bots_disponiveis])
+                "*Selecione o bot para ativar o Modo Crash:*",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
             )
     
     @restricted_access
@@ -332,35 +422,99 @@ class TelegramBot:
                 )
             else:
                 await query.edit_message_text(text=f"❌ Bot '{nome_bot}' não encontrado.")
+        
+        elif data.startswith('saldo:'):
+            nome_bot = data.split(':', 1)[1]
+            if nome_bot.upper() == 'TOTAL':
+                total_usdt = 0
+                total_posicao_usdt = 0
+                for worker in self.workers:
+                    status = worker.get_status_dict()
+                    total_usdt += status.get('saldo_disponivel_usdt', 0)
+                    total_posicao_usdt += status.get('status_posicao', {}).get('valor_total', 0)
+                
+                response = (
+                    f"💰 **Saldo Total Consolidado**\n\n"
+                    f"- **Valor em Posições:** ${total_posicao_usdt:.2f}\n"
+                    f"- **Saldo USDT Disponível:** ${total_usdt:.2f}\n"
+                    f"-----------------------------------\n"
+                    f"**Total Geral:** **${total_posicao_usdt + total_usdt:.2f}**"
+                )
+                await query.edit_message_text(response, parse_mode='Markdown')
+                return
+
+            bot_encontrado = None
+            for worker in self.workers:
+                if worker.config.get('nome_instancia') == nome_bot:
+                    bot_encontrado = worker
+                    break
+            
+            if bot_encontrado:
+                status = bot_encontrado.get_status_dict()
+                posicao = status.get('status_posicao', {})
+                response = (
+                    f"💰 **Saldo do Bot: {status.get('nome_instancia')} ({status.get('par')})**\n\n"
+                    f"- **Posição:** {posicao.get('quantidade', 0):.2f} {status.get('ativo_base', 'N/A')}\n"
+                    f"- **Valor da Posição:** ${posicao.get('valor_total', 0):.2f}\n"
+                    f"- **Saldo USDT Disponível:** ${status.get('saldo_disponivel_usdt', 0):.2f}"
+                )
+                await query.edit_message_text(response, parse_mode='Markdown')
+            else:
+                await query.edit_message_text(text=f"❌ Bot '{nome_bot}' não encontrado.")
+
+        elif data.startswith('crash:'):
+            nome_bot = data.split(':', 1)[1]
+            bot_encontrado = None
+            for worker in self.workers:
+                if worker.config.get('nome_instancia') == nome_bot:
+                    bot_encontrado = worker
+                    break
+            
+            if bot_encontrado:
+                bot_encontrado.command_queue.put({'comando': 'ativar_modo_crash'})
+                await query.edit_message_text(
+                    text=f"💥 *MODO CRASH ATIVADO* para '{nome_bot}'.",
+                    parse_mode='Markdown'
+                )
+            else:
+                await query.edit_message_text(text=f"❌ Bot '{nome_bot}' não encontrado.")
     
     @restricted_access
     async def ajuda(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Exibe a lista de comandos disponíveis."""
         help_text = (
-            "📋 *Comandos Disponíveis*\n\n"
+            "📋 <b>Comandos Disponíveis</b>\n\n"
             "🔹 /start - Inicia o bot e exibe boas-vindas\n\n"
             "🔹 /status - Exibe o status detalhado de todos os bots\n\n"
+            "🔹 /saldo [nome] - Exibe o saldo (sem args = modo interativo)\n"
+            "   Exemplo: <code>/saldo ADA</code>\n\n"
             "🔹 /pausar [nome] - Pausa compras (sem args = modo interativo)\n"
-            "   Exemplo: `/pausar ADA`\n\n"
+            "   Exemplo: <code>/pausar ADA</code>\n\n"
             "🔹 /liberar [nome] - Libera compras (sem args = modo interativo)\n"
-            "   Exemplo: `/liberar ADA`\n\n"
-            "🔹 /crash [nome] - Ativa modo crash (compras agressivas)\n"
-            "   Exemplo: `/crash ADA`\n\n"
+            "   Exemplo: <code>/liberar ADA</code>\n\n"
+            "🔹 /crash [nome] - Ativa modo crash (sem args = modo interativo)\n"
+            "   Exemplo: <code>/crash ADA</code>\n\n"
             "🔹 /crash_off [nome] - Desativa modo crash\n"
-            "   Exemplo: `/crash_off ADA`\n\n"
+            "   Exemplo: <code>/crash_off ADA</code>\n\n"
             "🔹 /parar - Para todos os bots e desliga o sistema\n\n"
             "🔹 /ajuda - Exibe esta mensagem de ajuda\n\n"
             "-----------------------------------\n\n"
-            "💡 *Bots Ativos:*\n"
+            "💡 <b>Bots Ativos:</b>\n"
         )
-        
+
         # Adicionar lista de bots disponíveis
         for worker in self.workers:
             nome = worker.config.get('nome_instancia', 'N/A')
             par = worker.config.get('par', 'N/A')
             help_text += f"• {nome} ({par})\n"
-        
-        await update.message.reply_text(help_text, parse_mode='Markdown')
+
+        await update.message.reply_text(help_text, parse_mode='HTML')
+
+    async def unknown_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Responde a comandos não reconhecidos."""
+        await update.message.reply_text(
+            "Comando não reconhecido. Use /ajuda para ver a lista de comandos disponíveis."
+        )
 
     async def enviar_mensagem(self, user_id: int, mensagem: str):
         """Envia uma mensagem proativa para um usuário específico.
@@ -374,6 +528,7 @@ class TelegramBot:
     async def run(self):
         self.application.add_handler(CommandHandler("start", self.start))
         self.application.add_handler(CommandHandler("status", self.status))
+        self.application.add_handler(CommandHandler("saldo", self.saldo))
         self.application.add_handler(CommandHandler("pausar", self.pausar))
         self.application.add_handler(CommandHandler("liberar", self.liberar))
         self.application.add_handler(CommandHandler("crash", self.crash))
@@ -381,6 +536,9 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("parar", self.parar))
         self.application.add_handler(CommandHandler("ajuda", self.ajuda))
         self.application.add_handler(CallbackQueryHandler(self.button_callback))
+
+        # Adicionar um handler para comandos não reconhecidos
+        self.application.add_handler(MessageHandler(filters.COMMAND, self.unknown_command))
 
         await self.application.initialize()
         await self.application.start()

@@ -589,9 +589,10 @@ class BotWorker:
                     
                     # Calcular distância da SMA
                     distancia_sma = self._calcular_distancia_sma(preco_atual)
-                    
+
                     if contador_ciclos == 1:
-                        self.logger.info(f"📊 Preço inicial ADA: ${preco_atual:.6f}")
+                        base_currency = self.config['par'].split('/')[0]
+                        self.logger.info(f"📊 Preço inicial {base_currency}: ${preco_atual:.6f}")
                         if distancia_sma:
                             self.logger.info(f"📉 Distância da SMA: {distancia_sma:.2f}%")
 
@@ -635,11 +636,12 @@ class BotWorker:
                     if contador_ciclos % 20 == 0:
                         posicao = self.position_manager.get_quantidade_total()
                         preco_medio = self.position_manager.get_preco_medio()
-                        
+
                         if posicao > 0 and preco_medio:
                             lucro_atual = self.position_manager.calcular_lucro_atual(preco_atual)
+                            base_currency = self.config['par'].split('/')[0]
                             self.logger.info(
-                                f"📊 Status: {posicao:.1f} ADA | "
+                                f"📊 Status: {posicao:.1f} {base_currency} | "
                                 f"PM: ${preco_medio:.6f} | "
                                 f"Lucro: {lucro_atual:+.2f}%" if lucro_atual else "📊 Sem posição ativa"
                             )
