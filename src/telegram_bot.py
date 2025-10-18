@@ -1,6 +1,6 @@
 from functools import wraps
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters, MessageHandler, filters
 from src.core.bot_worker import BotWorker
 
 def restricted_access(func):
