@@ -1,0 +1,11 @@
+{
+  "bots_ativos": [
+    "ADA",
+    "XRP"
+  ],
+  "relatorio_horario": {
+    "habilitado": true,
+    "intervalo_horas": 1,
+    "comentario": "Envia relatório detalhado via Telegram a cada X horas com métricas de sistema, performance dos bots e estatísticas 24h"
+  }
+}

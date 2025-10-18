@@ -182,9 +182,16 @@
     "exposicao_maxima_percentual_capital": 70.0,
     "reativar_compras_apos_venda": true,
     "compras_de_oportunidade_extrema": [
-      { "preco_alvo": 0.65, "percentual_capital_usar": 30 },
-      { "preco_alvo": 0.60, "percentual_capital_usar": 20 },
-      { "preco_alvo": 0.55, "percentual_capital_usar": 50 }
+      { 
+        "tipo": "absoluto", 
+        "preco_alvo": 0.60, 
+        "percentual_capital_usar": 25 
+      },
+      { 
+        "tipo": "percentual_pm",
+        "queda_pm_pct": 10.0,
+        "percentual_capital_usar": 25 
+      }
     ]
   }
 }

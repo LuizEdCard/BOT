@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import time
+import queue
 from decimal import Decimal
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any
@@ -55,9 +56,9 @@ class BotWorker:
         )
         self.state = StateManager(state_file_path=Path(self.config['STATE_FILE_PATH']))
 
-        # ═══════════════════════════════════════════════════════════════════
+        # ═══════════════════════════════════════
         # NOVA ARQUITETURA: Componentes Estratégicos
-        # ═══════════════════════════════════════════════════════════════════
+        # ═══════════════════════════════════════
         
         # Gerenciador de posições
         self.position_manager = PositionManager(self.db)
@@ -67,7 +68,8 @@ class BotWorker:
             config=self.config,
             position_manager=self.position_manager,
             gestao_capital=self.gestao_capital,
-            state_manager=self.state
+            state_manager=self.state,
+            worker=self
         )
         
         self.strategy_sell = StrategySell(
@@ -84,6 +86,12 @@ class BotWorker:
         self.ultimo_backup = datetime.now()
         self.rodando = False
         self.inicio_bot = datetime.now()
+        
+        # Fila de comandos para controle remoto
+        self.command_queue = queue.Queue()
+        self.compras_pausadas_manualmente = False
+        self.guardiao_suspenso_temporariamente = False
+        self.modo_crash_ativo = False
 
         # Configuração de aportes BRL
         self.aportes_config = self.config.get('APORTES', {})
@@ -189,6 +197,50 @@ class BotWorker:
             import traceback
             self.logger.error(f"Traceback:\n{traceback.format_exc()}")
 
+    def _processar_comandos(self):
+        """
+        Processa comandos da fila de comandos remotos
+        """
+        try:
+            while not self.command_queue.empty():
+                comando = self.command_queue.get_nowait()
+                
+                if comando.get('comando') == 'pausar_compras':
+                    self.compras_pausadas_manualmente = True
+                    self.logger.info("⏸️  COMPRAS PAUSADAS MANUALMENTE via comando remoto")
+                    
+                elif comando.get('comando') == 'liberar_compras':
+                    self.compras_pausadas_manualmente = False
+                    self.logger.info("▶️  COMPRAS LIBERADAS via comando remoto")
+                    
+                elif comando.get('comando') == 'suspender_guardiao':
+                    self.guardiao_suspenso_temporariamente = True
+                    self.logger.warning("🔓 GUARDIÃO SUSPENSO TEMPORARIAMENTE via comando remoto")
+                    
+                elif comando.get('comando') == 'reativar_guardiao':
+                    self.guardiao_suspenso_temporariamente = False
+                    self.logger.info("🛡️  GUARDIÃO REATIVADO via comando remoto")
+                    
+                elif comando.get('comando') == 'ativar_modo_crash':
+                    self.modo_crash_ativo = True
+                    self.logger.warning("💥" + "="*60)
+                    self.logger.warning("💥 MODO CRASH ATIVADO!")
+                    self.logger.warning("💥 Compras agressivas liberadas")
+                    self.logger.warning("💥 Restrições de exposição e preço médio IGNORADAS")
+                    self.logger.warning("💥" + "="*60)
+                    
+                elif comando.get('comando') == 'desativar_modo_crash':
+                    self.modo_crash_ativo = False
+                    self.logger.info("✅ MODO CRASH DESATIVADO - Retornando ao modo normal")
+                    
+                else:
+                    self.logger.warning(f"⚠️  Comando desconhecido: {comando}")
+                    
+        except queue.Empty:
+            pass
+        except Exception as e:
+            self.logger.error(f"❌ Erro ao processar comandos: {e}")
+    
     def _obter_preco_atual_seguro(self) -> Decimal:
         """Obtém preço atual com fallback seguro"""
         try:
@@ -203,8 +255,10 @@ class BotWorker:
         agora = datetime.now()
 
         # Atualizar apenas se passou 1 hora ou se nunca foi calculada
-        if (self.ultima_atualizacao_sma is None or
-            (agora - self.ultima_atualizacao_sma) >= timedelta(hours=1)):
+        if (
+            self.ultima_atualizacao_sma is None
+            or (agora - self.ultima_atualizacao_sma) >= timedelta(hours=1)
+        ):
 
             self.logger.info("📊 Calculando SMA de referência (4 semanas)...")
             self.logger.info("🔄 Atualizando SMA de referência (4 semanas)...")
@@ -244,6 +298,11 @@ class BotWorker:
         Returns:
             bool: True se compra foi executada com sucesso
         """
+        # Verificar se compras estão pausadas manualmente
+        if self.compras_pausadas_manualmente:
+            self.logger.debug("⏸️  Compra bloqueada: compras pausadas manualmente")
+            return False
+        
         try:
             tipo = oportunidade['tipo']
             quantidade = oportunidade['quantidade']
@@ -515,11 +574,14 @@ class BotWorker:
             self.rodando = True
             contador_ciclos = 0
 
-            # ═══════════════════════════════════════════════════════════════
+            # ═══════════════════════════════════════
             # LOOP PRINCIPAL SIMPLIFICADO
-            # ═══════════════════════════════════════════════════════════════
+            # ═══════════════════════════════════════
             while self.rodando:
                 try:
+                    # Processar comandos remotos
+                    self._processar_comandos()
+                    
                     contador_ciclos += 1
 
                     # 1. Obter preço atual
@@ -587,18 +649,96 @@ class BotWorker:
 
                 except KeyboardInterrupt:
                     self.logger.info("🛑 Interrupção solicitada pelo usuário")
-                    break
+                    self.rodando = False
+                    continue
                 except Exception as e:
-                    self.logger.error(f"❌ Erro fatal no loop principal: {e}")
-                    import traceback
-                    self.logger.error(f"Traceback:\n{traceback.format_exc()}")
-                    break
+                    self.logger.error(f'Erro inesperado no loop principal: {e}', exc_info=True)
+                    self.estado_bot = 'ERRO'
+                    time.sleep(60)
+                    continue
 
         except Exception as e:
             self.logger.error(f"❌ Erro crítico no bot: {e}")
         finally:
             self.rodando = False
             self.logger.banner("🛑 BOT FINALIZADO")
+
+    def get_status_dict(self) -> Dict[str, Any]:
+        """
+        Coleta e retorna um dicionário com o estado atual do bot.
+        Inclui estatísticas das últimas 24h e status da thread.
+        """
+        try:
+            preco_atual = self._obter_preco_atual_seguro()
+            lucro_atual = self.position_manager.calcular_lucro_atual(preco_atual)
+            quantidade_total = self.position_manager.get_quantidade_total()
+            valor_total_atual = quantidade_total * preco_atual
+            valor_investido = self.position_manager.get_valor_total_investido()
+            lucro_usdt = valor_total_atual - valor_investido
+
+            base_currency, _ = self.config['par'].split('/')
+            saldo_disponivel_usdt = self.gestao_capital.saldo_usdt
+
+            # Lógica de estado inteligente
+            estado_bot = 'Operando | Aguardando Oportunidade'
+            if saldo_disponivel_usdt < 10:
+                estado_bot = 'Sem Saldo | Aguardando Venda/Aporte'
+            else:
+                limite_exposicao = Decimal(str(self.config.get('GESTAO_DE_RISCO', {}).get('exposicao_maxima_percentual_capital', 70.0)))
+                alocacao_atual = self.gestao_capital.get_alocacao_percentual_ada()
+                if alocacao_atual > limite_exposicao:
+                    estado_bot = 'Exposição Máxima | Compras Suspensas'
+
+            status_posicao = {
+                'quantidade': quantidade_total,
+                'preco_medio': self.position_manager.get_preco_medio(),
+                'valor_total': valor_total_atual,
+                'lucro_percentual': lucro_atual,
+                'lucro_usdt': lucro_usdt
+            }
+
+            # Estatísticas das últimas 24h
+            try:
+                estatisticas_24h = self.db.obter_estatisticas_24h()
+            except Exception as e:
+                self.logger.warning(f"⚠️ Erro ao obter estatísticas 24h: {e}")
+                estatisticas_24h = {
+                    'compras': 0,
+                    'vendas': 0,
+                    'lucro_realizado': 0
+                }
+
+            uptime = datetime.now() - self.inicio_bot
+
+            return {
+                'nome_instancia': self.config.get('nome_instancia', self.config.get('BOT_NAME')),
+                'par': self.config['par'],
+                'preco_atual': preco_atual,
+                'status_posicao': status_posicao,
+                'estado_bot': estado_bot,
+                'sma_referencia': self.sma_referencia,
+                'distancia_sma': self._calcular_distancia_sma(preco_atual),
+                'rodando_desde': self.inicio_bot.strftime('%Y-%m-%d %H:%M:%S'),
+                'uptime': str(uptime).split('.')[0],
+                'ultima_compra': self.db.obter_ultima_ordem('COMPRA'),
+                'ultima_venda': self.db.obter_ultima_ordem('VENDA'),
+                'saldo_disponivel_usdt': saldo_disponivel_usdt,
+                'ativo_base': base_currency,
+                # Novos campos para relatório horário
+                'compras_24h': estatisticas_24h['compras'],
+                'vendas_24h': estatisticas_24h['vendas'],
+                'lucro_realizado_24h': estatisticas_24h['lucro_realizado'],
+                'thread_ativa': self.rodando
+            }
+        except Exception as e:
+            self.logger.error(f"❌ Erro ao gerar dicionário de status: {e}", exc_info=True)
+            return {
+                'nome_instancia': self.config.get('nome_instancia', self.config.get('BOT_NAME')),
+                'par': self.config.get('par', 'N/A'),
+                'error': str(e),
+                'estado_bot': 'ERRO INTERNO',
+                'thread_ativa': False
+            }
 
 
 if __name__ == '__main__':

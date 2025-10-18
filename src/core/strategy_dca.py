@@ -26,7 +26,8 @@ class StrategyDCA:
         config: Dict[str, Any], 
         position_manager: PositionManager,
         gestao_capital: GestaoCapital,
-        state_manager: StateManager
+        state_manager: StateManager,
+        worker=None
     ):
         """
         Inicializa a estratégia DCA
@@ -36,11 +37,13 @@ class StrategyDCA:
             position_manager: Gerenciador de posições
             gestao_capital: Gerenciador de capital
             state_manager: Gerenciador de estado
+            worker: Referência ao BotWorker (para acessar modo crash)
         """
         self.config = config
         self.position_manager = position_manager
         self.gestao_capital = gestao_capital
         self.state = state_manager
+        self.worker = worker
         
         # Cache para evitar spam de logs
         self.ultima_tentativa_log_degrau: Dict[int, datetime] = {}
@@ -73,8 +76,14 @@ class StrategyDCA:
             Dict com detalhes da oportunidade ou None se não houver
         """
         try:
-            # Verificar guardião de exposição máxima
-            if not self._verificar_guardiao_exposicao():
+            # MODO CRASH: Ignorar todas as restrições
+            modo_crash = self.worker.modo_crash_ativo if self.worker else False
+            
+            if modo_crash:
+                logger.warning("💥 MODO CRASH: Ignorando restrições de exposição e preço médio")
+            
+            # Verificar guardião de exposição máxima (exceto em modo crash)
+            if not modo_crash and not self._verificar_guardiao_exposicao():
                 return self._verificar_oportunidades_extremas(preco_atual)
             
             # Buscar degrau ativo baseado na distância da SMA
@@ -83,8 +92,8 @@ class StrategyDCA:
                 logger.debug(f"📊 Nenhum degrau ativo para queda de {distancia_sma:.2f}%")
                 return None
             
-            # Verificar dupla-condição: SMA + melhora do preço médio
-            if not self._verificar_dupla_condicao(degrau_ativo, preco_atual, distancia_sma):
+            # Verificar dupla-condição: SMA + melhora do preço médio (exceto em modo crash)
+            if not modo_crash and not self._verificar_dupla_condicao(degrau_ativo, preco_atual, distancia_sma):
                 return None
             
             # Verificar cooldowns (global + por degrau)
@@ -173,7 +182,8 @@ class StrategyDCA:
     
     def _verificar_oportunidades_extremas(self, preco_atual: Decimal) -> Optional[Dict[str, Any]]:
         """
-        Verifica oportunidades de compra em camadas extremas quando exposição máxima atingida
+        Verifica oportunidades de compra em camadas extremas quando exposição máxima atingida.
+        Suporta gatilhos de preço 'absoluto' e 'percentual_pm'.
         
         Args:
             preco_atual: Preço atual do ativo
@@ -187,32 +197,53 @@ class StrategyDCA:
                 return None
             
             oportunidades_usadas = self.state.get_state('oportunidades_extremas_usadas', default=[])
-            
-            for camada in camadas_oportunidade:
-                preco_alvo = Decimal(str(camada['preco_alvo']))
+            preco_medio_atual = self.position_manager.get_preco_medio()
+
+            for i, camada in enumerate(camadas_oportunidade):
+                camada_id = f"camada_{i}"
+                if camada_id in oportunidades_usadas:
+                    continue
+
+                tipo_gatilho = camada.get("tipo", "absoluto")
+                gatilho_atingido = False
+                motivo = ""
+
+                if tipo_gatilho == "absoluto":
+                    preco_alvo = Decimal(str(camada['preco_alvo']))
+                    if preco_atual <= preco_alvo:
+                        gatilho_atingido = True
+                        motivo = f"Oportunidade Extrema Absoluta (Preço <= {preco_alvo})"
                 
-                # Verificar se preço atingiu o alvo e camada ainda não foi usada
-                if preco_atual <= preco_alvo and str(preco_alvo) not in oportunidades_usadas:
-                    logger.info(f"🚨 OPORTUNIDADE EXTREMA (Camada {preco_alvo}) DETECTADA!")
+                elif tipo_gatilho == "percentual_pm":
+                    if preco_medio_atual and preco_medio_atual > 0:
+                        queda_pm_pct = Decimal(str(camada['queda_pm_pct']))
+                        preco_alvo_dinamico = preco_medio_atual * (Decimal('1') - queda_pm_pct / Decimal('100'))
+                        if preco_atual <= preco_alvo_dinamico:
+                            gatilho_atingido = True
+                            motivo = f"Oportunidade Extrema Percentual ({queda_pm_pct}% abaixo do PM {preco_medio_atual:.4f})"
+                    else:
+                        logger.debug("PM indisponível para camada de oportunidade percentual.")
+                        continue
+
+                if gatilho_atingido:
+                    logger.info(f"🚨 {motivo.upper()} DETECTADA!")
                     
                     percentual_a_usar = Decimal(str(camada['percentual_capital_usar']))
                     capital_disponivel = self.gestao_capital.calcular_capital_disponivel()
                     valor_compra_usdt = capital_disponivel * (percentual_a_usar / Decimal('100'))
                     quantidade_ada = valor_compra_usdt / preco_atual
                     
-                    # Validar valor mínimo de ordem
                     valor_minimo = Decimal(str(self.config.get('VALOR_MINIMO_ORDEM', 5.0)))
                     if valor_compra_usdt >= valor_minimo and quantidade_ada >= Decimal('1'):
                         return {
                             'tipo': 'oportunidade_extrema',
-                            'degrau': f"extrema_{preco_alvo}",
+                            'degrau': f"extrema_{camada_id}",
                             'quantidade': quantidade_ada,
                             'preco_atual': preco_atual,
                             'valor_ordem': valor_compra_usdt,
-                            'preco_alvo': preco_alvo,
                             'percentual_capital': percentual_a_usar,
-                            'motivo': f"Oportunidade Extrema {preco_alvo}",
-                            'marcar_como_usada': str(preco_alvo)
+                            'motivo': motivo,
+                            'marcar_como_usada': camada_id
                         }
                     else:
                         logger.warning(f"⚠️ Oportunidade extrema ignorada - valor abaixo do mínimo: ${valor_compra_usdt:.2f}")
@@ -220,7 +251,7 @@ class StrategyDCA:
             return None
             
         except Exception as e:
-            logger.error(f"❌ Erro ao verificar oportunidades extremas: {e}")
+            logger.error(f"❌ Erro ao verificar oportunidades extremas: {e}", exc_info=True)
             return None
     
     def _encontrar_degrau_ativo(self, distancia_sma: Decimal) -> Optional[Dict[str, Any]]:

@@ -164,9 +164,9 @@ class Logger:
         """Log nível WARNING"""
         self.logger.warning(mensagem)
 
-    def error(self, mensagem: str):
+    def error(self, mensagem: str, exc_info: bool = False):
         """Log nível ERROR"""
-        self.logger.error(mensagem)
+        self.logger.error(mensagem, exc_info=exc_info)
 
     def critical(self, mensagem: str):
         """Log nível CRITICAL"""

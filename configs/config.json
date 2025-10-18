@@ -5,5 +5,9 @@
     "backup_enabled": true,
     "database_path": "dados/bot_trading.db",
     "backup_dir": "dados/backup"
+  },
+  "relatorio_horario": {
+    "habilitado": true,
+    "intervalo_horas": 1
   }
 }
