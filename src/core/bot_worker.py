@@ -4,6 +4,7 @@ Bot Worker - Orquestrador de Estratégias de Trading
 """
 
 import sys
+import asyncio
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -31,10 +32,11 @@ from src.utils.constants import Icones, LogConfig
 class BotWorker:
     """Bot Worker - Orquestrador de Estratégias de Trading"""
 
-    def __init__(self, config: Dict[str, Any], exchange_api: ExchangeAPI):
+    def __init__(self, config: Dict[str, Any], exchange_api: ExchangeAPI, telegram_notifier=None):
         """Inicializar bot worker"""
         self.config = config
         self.exchange_api = exchange_api
+        self.telegram_notifier = telegram_notifier
 
         self.logger, self.panel_logger = get_loggers(
             nome=self.config.get('BOT_NAME', 'BotWorker'),
@@ -175,7 +177,8 @@ class BotWorker:
                         self.logger.info("✅ Banco de dados sincronizado com sucesso com a exchange!")
                     else:
                         self.logger.warning(f"⚠️ Ainda há divergência de {diferenca_pos_correcao:.2f} {base_currency} após correção")
-                        self.logger.warning("⚠️ Pode haver trades manuais ou operações não rastreadas")
+                        self.logger.warning("⚠️ Forçando a quantidade da posição para o saldo real da exchange.")
+                        self.position_manager.forcar_quantidade(Decimal(str(saldo_base_real)))
                     
                 except Exception as erro_correcao:
                     self.logger.error(f"❌ Erro durante auto-correção: {erro_correcao}")
@@ -232,6 +235,38 @@ class BotWorker:
                 elif comando.get('comando') == 'desativar_modo_crash':
                     self.modo_crash_ativo = False
                     self.logger.info("✅ MODO CRASH DESATIVADO - Retornando ao modo normal")
+
+                elif comando.get('comando') == 'force_buy':
+                    valor_usdt = Decimal(comando.get('valor'))
+                    self.logger.info(f"🚨 COMPRA FORÇADA de {valor_usdt} USDT")
+                    preco_atual = self._obter_preco_atual_seguro()
+                    quantidade = valor_usdt / preco_atual
+                    self._executar_oportunidade_compra({
+                        'tipo': 'manual',
+                        'quantidade': quantidade,
+                        'preco_atual': preco_atual,
+                        'motivo': 'Compra forçada via Telegram'
+                    })
+
+                elif comando.get('comando') == 'force_sell':
+                    percentual = Decimal(comando.get('percentual'))
+                    self.logger.info(f"🚨 VENDA FORÇADA de {percentual}% da posição")
+                    quantidade_total = self.position_manager.get_quantidade_total()
+                    quantidade_a_vender = quantidade_total * (percentual / 100)
+                    preco_atual = self._obter_preco_atual_seguro()
+                    self._executar_oportunidade_venda({
+                        'tipo': 'manual',
+                        'quantidade_venda': quantidade_a_vender,
+                        'preco_atual': preco_atual,
+                        'motivo': f'Venda forçada de {percentual}% via Telegram'
+                    })
+                elif comando.get('comando') == 'ajustar_risco':
+                    novo_limite = comando.get('novo_limite')
+                    if isinstance(novo_limite, (int, float)) and 0 <= novo_limite <= 100:
+                        self.config['GESTAO_DE_RISCO']['exposicao_maxima_percentual_capital'] = novo_limite
+                        self.logger.info(f"⚙️ Limite de exposição ajustado para {novo_limite}% para '{self.config.get('nome_instancia')}' via comando remoto.")
+                    else:
+                        self.logger.error(f"❌ Valor de risco inválido: {novo_limite}. O valor deve ser um número entre 0 e 100.")
                     
                 else:
                     self.logger.warning(f"⚠️  Comando desconhecido: {comando}")
@@ -328,6 +363,11 @@ class BotWorker:
                     queda_pct=float(oportunidade.get('distancia_sma', 0))
                 )
 
+                if self.telegram_notifier and self.telegram_notifier.loop:
+                    mensagem = f"✅ COMPRA REALIZADA: {quantidade_real:.2f} {self.config['par'].split('/')[0]} @ ${preco_real:.4f}"
+                    future = asyncio.run_coroutine_threadsafe(self.telegram_notifier.enviar_mensagem(self.telegram_notifier.authorized_user_id, mensagem), self.telegram_notifier.loop)
+                    future.result()
+
                 # Atualizar position manager
                 self.position_manager.atualizar_apos_compra(quantidade_real, preco_real)
 
@@ -401,6 +441,11 @@ class BotWorker:
                     lucro_pct=float(lucro_pct),
                     lucro_usd=float(lucro_usdt)
                 )
+
+                if self.telegram_notifier and self.telegram_notifier.loop:
+                    mensagem = f"✅ VENDA REALIZADA: {quantidade_real:.2f} {self.config['par'].split('/')[0]} @ ${preco_real:.4f} | Lucro: ${lucro_usdt:.2f} ({lucro_pct:.2f}%)"
+                    future = asyncio.run_coroutine_threadsafe(self.telegram_notifier.enviar_mensagem(self.telegram_notifier.authorized_user_id, mensagem), self.telegram_notifier.loop)
+                    future.result()
 
                 # Atualizar position manager
                 self.position_manager.atualizar_apos_venda(quantidade_real)
@@ -661,6 +706,10 @@ class BotWorker:
 
         except Exception as e:
             self.logger.error(f"❌ Erro crítico no bot: {e}")
+            if self.telegram_notifier and self.telegram_notifier.loop:
+                mensagem = f"❌ ERRO CRÍTICO no bot {self.config.get('nome_instancia', '')}: {e}"
+                future = asyncio.run_coroutine_threadsafe(self.telegram_notifier.enviar_mensagem(self.telegram_notifier.authorized_user_id, mensagem), self.telegram_notifier.loop)
+                future.result()
         finally:
             self.rodando = False
             self.logger.banner("🛑 BOT FINALIZADO")
@@ -741,6 +790,13 @@ class BotWorker:
                 'estado_bot': 'ERRO INTERNO',
                 'thread_ativa': False
             }
+
+    def get_detailed_status_dict(self) -> Dict[str, Any]:
+        """Coleta e retorna um dicionário com o estado detalhado do bot."""
+        status = self.get_status_dict()
+        strategy_stats = self.strategy_dca.obter_estatisticas()
+        status.update(strategy_stats)
+        return status
 
 
 if __name__ == '__main__':
