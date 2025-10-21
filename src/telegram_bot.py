@@ -799,5 +799,4 @@ class TelegramBot:
         await self.application.updater.start_polling()
         
         # Keep the bot running
-        import asyncio
         await asyncio.Event().wait()
