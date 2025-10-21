@@ -588,7 +588,7 @@ class DatabaseManager:
                         taxa,
                         order_id,
                         f"Importado do histórico da Binance - Status: {ordem.get('status')}",
-                        'acumulacao'  # Ordens importadas são atribuídas à estratégia de acumulação
+                        None  # Estratégia será restaurada pelo método save/restore do binance_api.py
                     ))
 
                     importadas += 1

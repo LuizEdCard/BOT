@@ -43,8 +43,19 @@ class Notifier:
             bool: True se a mensagem foi enviada com sucesso, False caso contrário
         """
         try:
-            if not self.telegram_bot or not self.telegram_bot.loop:
+            if not self.telegram_bot:
                 self.logger.warning("⚠️ TelegramBot não disponível para envio de notificação")
+                return False
+            
+            # Aguardar até que o loop seja inicializado (máximo 5 segundos)
+            import time
+            tentativas = 0
+            while not self.telegram_bot.loop and tentativas < 50:
+                time.sleep(0.1)
+                tentativas += 1
+            
+            if not self.telegram_bot.loop:
+                self.logger.warning("⚠️ Loop do TelegramBot ainda não foi inicializado")
                 return False
 
             # Enviar mensagem de forma assíncrona
@@ -53,8 +64,8 @@ class Notifier:
                 self.telegram_bot.loop
             )
 
-            # Aguardar resultado (timeout de 10 segundos)
-            future.result(timeout=10)
+            # Aguardar resultado (timeout de 30 segundos)
+            future.result(timeout=30)
 
             self.logger.debug(f"📤 Notificação enviada: {mensagem[:50]}...")
             return True

@@ -166,17 +166,23 @@ class BotWorker:
             saldo_base_real = self.exchange_api.get_saldo_disponivel(base_currency)
             saldo_quote_real = self.exchange_api.get_saldo_disponivel(quote_currency)
 
-            # 2. Carregar posição do banco de dados LOCAL
-            quantidade_local = self.position_manager.get_quantidade_total()
+            # 2. Carregar posição do banco de dados LOCAL (TODAS as carteiras)
+            quantidade_acumulacao = self.position_manager.get_quantidade_total('acumulacao')
+            quantidade_giro = self.position_manager.get_quantidade_total('giro_rapido')
+            quantidade_local = quantidade_acumulacao + quantidade_giro
 
-            self.logger.info(f"📊 Saldo LOCAL (banco de dados): {quantidade_local:.1f} {base_currency}")
+            self.logger.info(f"📊 Saldo LOCAL (banco de dados):")
+            self.logger.info(f"   • Acumulação: {quantidade_acumulacao:.1f} {base_currency}")
+            self.logger.info(f"   • Giro Rápido: {quantidade_giro:.1f} {base_currency}")
+            self.logger.info(f"   • TOTAL: {quantidade_local:.1f} {base_currency}")
             self.logger.info(f"📊 Saldo EXCHANGE (API real): {saldo_base_real:.1f} {base_currency} | ${saldo_quote_real:.2f} {quote_currency}")
 
             # 3. Comparar os dois valores
             diferenca_absoluta = abs(Decimal(str(saldo_base_real)) - quantidade_local)
-            
-            # Calcular tolerância: 1% do saldo da API (mínimo 0.1)
-            tolerancia = max(Decimal(str(saldo_base_real)) * Decimal('0.01'), Decimal('0.1'))
+
+            # Calcular tolerância: 2.5% do saldo da API (mínimo 0.5)
+            # Tolerância mais alta para evitar reimports por pequenas divergências
+            tolerancia = max(Decimal(str(saldo_base_real)) * Decimal('0.025'), Decimal('0.5'))
             
             self.logger.info(f"📏 Diferença detectada: {diferenca_absoluta:.2f} {base_currency} (tolerância: {tolerancia:.2f})")
 
@@ -200,10 +206,13 @@ class BotWorker:
                     
                     # 4b. Recarregar o PositionManager para refletir os dados corretos
                     self.logger.info("🔄 Recarregando PositionManager com dados corrigidos...")
-                    self.position_manager.carregar_posicao()
-                    
-                    # Verificar novamente após correção
-                    quantidade_corrigida = self.position_manager.get_quantidade_total()
+                    self.position_manager.carregar_posicao('acumulacao')
+                    self.position_manager.carregar_posicao('giro_rapido')
+
+                    # Verificar novamente após correção (TOTAL de ambas carteiras)
+                    quantidade_acum_corrigida = self.position_manager.get_quantidade_total('acumulacao')
+                    quantidade_giro_corrigida = self.position_manager.get_quantidade_total('giro_rapido')
+                    quantidade_corrigida = quantidade_acum_corrigida + quantidade_giro_corrigida
                     diferenca_pos_correcao = abs(Decimal(str(saldo_base_real)) - quantidade_corrigida)
                     
                     self.logger.info(f"✅ Auto-correção concluída!")
@@ -215,8 +224,9 @@ class BotWorker:
                         self.logger.info("✅ Banco de dados sincronizado com sucesso com a exchange!")
                     else:
                         self.logger.warning(f"⚠️ Ainda há divergência de {diferenca_pos_correcao:.2f} {base_currency} após correção")
-                        self.logger.warning("⚠️ Forçando a quantidade da posição para o saldo real da exchange.")
-                        self.position_manager.forcar_quantidade(Decimal(str(saldo_base_real)), 'acumulacao')
+                        self.logger.warning("⚠️ Não forçando quantidade - verifique manualmente as estratégias no banco")
+                        # NÃO forçar quantidade porque isso pode misturar as carteiras
+                        # O usuário deve verificar manualmente o banco de dados
                     
                 except Exception as erro_correcao:
                     self.logger.error(f"❌ Erro durante auto-correção: {erro_correcao}")
@@ -403,12 +413,14 @@ class BotWorker:
                 )
 
                 # Notificação com identificação da carteira
-                if self.telegram_notifier and self.telegram_notifier.loop:
+                if self.notifier:
                     carteira_emoji = "📊" if carteira == 'acumulacao' else "🎯"
                     carteira_nome = "Acumulação" if carteira == 'acumulacao' else "Giro Rápido"
-                    mensagem = f"✅ COMPRA REALIZADA [{carteira_emoji} {carteira_nome}]\n{quantidade_real:.2f} {self.config['par'].split('/')[0]} @ ${preco_real:.4f}"
-                    future = asyncio.run_coroutine_threadsafe(self.telegram_notifier.enviar_mensagem(self.telegram_notifier.authorized_user_id, mensagem), self.telegram_notifier.loop)
-                    future.result()
+                    mensagem = f"{quantidade_real:.2f} {self.config['par'].split('/')[0]} @ ${preco_real:.4f}"
+                    self.notifier.enviar_sucesso(
+                        f"COMPRA REALIZADA [{carteira_emoji} {carteira_nome}]",
+                        mensagem
+                    )
 
                 # Atualizar position manager (com carteira correta)
                 self.position_manager.atualizar_apos_compra(quantidade_real, preco_real, carteira)
@@ -498,12 +510,14 @@ class BotWorker:
                 )
 
                 # Notificação com identificação da carteira
-                if self.telegram_notifier and self.telegram_notifier.loop:
+                if self.notifier:
                     carteira_emoji = "📊" if carteira == 'acumulacao' else "🎯"
                     carteira_nome = "Acumulação" if carteira == 'acumulacao' else "Giro Rápido"
-                    mensagem = f"✅ VENDA REALIZADA [{carteira_emoji} {carteira_nome}]\n{quantidade_real:.2f} {self.config['par'].split('/')[0]} @ ${preco_real:.4f}\nLucro: ${lucro_usdt:.2f} ({lucro_pct:.2f}%)"
-                    future = asyncio.run_coroutine_threadsafe(self.telegram_notifier.enviar_mensagem(self.telegram_notifier.authorized_user_id, mensagem), self.telegram_notifier.loop)
-                    future.result()
+                    mensagem = f"{quantidade_real:.2f} {self.config['par'].split('/')[0]} @ ${preco_real:.4f}\nLucro: ${lucro_usdt:.2f} ({lucro_pct:.2f}%)"
+                    self.notifier.enviar_sucesso(
+                        f"VENDA REALIZADA [{carteira_emoji} {carteira_nome}]",
+                        mensagem
+                    )
 
                 # Atualizar position manager (com carteira correta)
                 self.position_manager.atualizar_apos_venda(quantidade_real, carteira)
@@ -798,10 +812,11 @@ class BotWorker:
 
         except Exception as e:
             self.logger.error(f"❌ Erro crítico no bot: {e}")
-            if self.telegram_notifier and self.telegram_notifier.loop:
-                mensagem = f"❌ ERRO CRÍTICO no bot {self.config.get('nome_instancia', '')}: {e}"
-                future = asyncio.run_coroutine_threadsafe(self.telegram_notifier.enviar_mensagem(self.telegram_notifier.authorized_user_id, mensagem), self.telegram_notifier.loop)
-                future.result()
+            if self.notifier:
+                self.notifier.enviar_alerta(
+                    f"ERRO CRÍTICO - {self.config.get('nome_instancia', 'Bot')}",
+                    str(e)
+                )
         finally:
             self.rodando = False
             self.main_logger.banner("🛑 BOT FINALIZADO")

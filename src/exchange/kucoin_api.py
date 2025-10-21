@@ -22,6 +22,54 @@ class KucoinAPI(ExchangeAPI):
     def _format_pair(self, par: str) -> str:
         return par.replace('/', '-')
 
+    def _formatar_quantidade(self, symbol: str, quantidade: float) -> str:
+        """
+        Formata a quantidade de acordo com o baseIncrement do símbolo na KuCoin.
+
+        Args:
+            symbol: Símbolo no formato KuCoin (ex: XRP-USDT)
+            quantidade: Quantidade a ser formatada
+
+        Returns:
+            String com quantidade formatada respeitando o baseIncrement
+        """
+        try:
+            # Buscar informações do símbolo
+            response = requests.get(f'https://api.kucoin.com/api/v1/symbols', timeout=10)
+            response.raise_for_status()
+            data = response.json()
+
+            if data.get('code') == '200000':
+                symbols = data.get('data', [])
+                symbol_info = next((s for s in symbols if s['symbol'] == symbol), None)
+
+                if symbol_info:
+                    base_increment = float(symbol_info.get('baseIncrement', '0.0001'))
+
+                    # Calcular número de casas decimais do baseIncrement
+                    from decimal import Decimal, ROUND_DOWN
+                    increment_str = f"{base_increment:.8f}".rstrip('0')
+                    if '.' in increment_str:
+                        decimais = len(increment_str.split('.')[1])
+                    else:
+                        decimais = 0
+
+                    # Arredondar para baixo para múltiplo do baseIncrement
+                    quantidade_decimal = Decimal(str(quantidade))
+                    increment_decimal = Decimal(str(base_increment))
+                    quantidade_ajustada = (quantidade_decimal // increment_decimal) * increment_decimal
+
+                    quantidade_formatada = f"{float(quantidade_ajustada):.{decimais}f}"
+
+                    logger.debug(f"📏 Ajuste KuCoin {symbol}: {quantidade} → {quantidade_formatada} (increment: {base_increment})")
+                    return quantidade_formatada
+
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao obter baseIncrement para {symbol}: {e}")
+
+        # Fallback: usar precisão padrão de 4 casas decimais
+        return f"{quantidade:.4f}"
+
     def get_preco_atual(self, par: str) -> float:
         max_retries = 3
         last_exception = None
@@ -70,10 +118,14 @@ class KucoinAPI(ExchangeAPI):
         for tentativa in range(max_retries):
             try:
                 kucoin_par = self._format_pair(par)
+
+                # Formatar quantidade de acordo com baseIncrement
+                quantidade_formatada = self._formatar_quantidade(kucoin_par, quantidade)
+
                 order = self.trade_client.create_market_order(
                     symbol=kucoin_par,
                     side='buy',
-                    size=str(quantidade)
+                    size=quantidade_formatada
                 )
 
                 # Mapear 'id' da KuCoin para 'orderId' (compatibilidade com Binance)
@@ -105,10 +157,14 @@ class KucoinAPI(ExchangeAPI):
         for tentativa in range(max_retries):
             try:
                 kucoin_par = self._format_pair(par)
+
+                # Formatar quantidade de acordo com baseIncrement
+                quantidade_formatada = self._formatar_quantidade(kucoin_par, quantidade)
+
                 order = self.trade_client.create_market_order(
                     symbol=kucoin_par,
                     side='sell',
-                    size=str(quantidade)
+                    size=quantidade_formatada
                 )
 
                 # Mapear 'id' da KuCoin para 'orderId' (compatibilidade com Binance)
@@ -277,11 +333,27 @@ class KucoinAPI(ExchangeAPI):
                     logger.warning("⚠️ Nenhuma ordem encontrada no histórico da exchange")
                     return
                 
-                logger.info(f"🗑️ Removendo ordens dos últimos 60 dias do banco local (>= {inicio_data_str[:10]})...")
-                logger.info("📌 Ordens mais antigas serão preservadas")
-                
+                logger.info(f"🗑️ Preparando sincronização dos últimos 60 dias (>= {inicio_data_str[:10]})...")
+                logger.info("📌 Ordens mais antigas e estratégias serão preservadas")
+
+                # Dicionário para salvar estratégias: order_id -> estrategia
+                estrategias_salvas = {}
+
                 with database_manager._conectar() as conn:
                     cursor = conn.cursor()
+
+                    # SALVAR estratégias das ordens que serão removidas
+                    cursor.execute("""
+                        SELECT order_id, estrategia FROM ordens
+                        WHERE timestamp >= ? AND order_id IS NOT NULL AND estrategia IS NOT NULL
+                    """, (inicio_data_str,))
+
+                    for row in cursor.fetchall():
+                        order_id, estrategia = row
+                        estrategias_salvas[order_id] = estrategia
+
+                    logger.info(f"💾 Salvando estratégias de {len(estrategias_salvas)} ordens")
+
                     cursor.execute("SELECT COUNT(*) FROM ordens WHERE timestamp >= ?", (inicio_data_str,))
                     total_remover = cursor.fetchone()[0]
                     cursor.execute("SELECT COUNT(*) FROM ordens WHERE timestamp < ?", (inicio_data_str,))
@@ -317,17 +389,44 @@ class KucoinAPI(ExchangeAPI):
                             cursor.execute("""
                                 INSERT INTO ordens (
                                     timestamp, tipo, par, quantidade, preco, valor_total, taxa,
-                                    order_id, observacao
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    order_id, observacao, estrategia
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """, (
                                 timestamp, tipo, par, quantidade, preco, valor_total, taxa,
-                                order_id, f"Importado do histórico da KuCoin - Status: {ordem.get('status')}"
+                                order_id, f"Importado do histórico da KuCoin - Status: {ordem.get('status')}",
+                                None  # Estratégia será restaurada pelo método save/restore
                             ))
                             importadas += 1
                         except Exception as e:
                             logger.error(f"❌ Erro ao importar ordem {ordem.get('id')}: {e}")
                             erros += 1
                 
+                # RESTAURAR estratégias salvas
+                if estrategias_salvas:
+                    logger.info(f"🔄 Restaurando estratégias de {len(estrategias_salvas)} ordens...")
+                    restauradas = 0
+
+                    with database_manager._conectar() as conn:
+                        cursor = conn.cursor()
+
+                        for order_id, estrategia in estrategias_salvas.items():
+                            try:
+                                cursor.execute("""
+                                    UPDATE ordens
+                                    SET estrategia = ?
+                                    WHERE order_id = ? AND estrategia IS NULL
+                                """, (estrategia, str(order_id)))
+
+                                if cursor.rowcount > 0:
+                                    restauradas += 1
+
+                            except Exception as e:
+                                logger.warning(f"⚠️ Erro ao restaurar estratégia para ordem {order_id}: {e}")
+
+                        conn.commit()
+
+                    logger.info(f"✅ Estratégias restauradas: {restauradas}/{len(estrategias_salvas)}")
+
                 if importadas > 0:
                     try:
                         with database_manager._conectar() as conn:
@@ -353,13 +452,14 @@ class KucoinAPI(ExchangeAPI):
                                 logger.info(f"📊 Preço médio recalculado: ${preco_medio:.6f} ({quantidade_atual:.1f})")
                     except Exception as e:
                         logger.warning(f"⚠️ Erro ao recalcular preço médio: {e}")
-                
+
                 logger.info(f"✅ Sincronização concluída:")
                 logger.info(f"   • Importadas: {importadas}")
                 logger.info(f"   • Duplicadas: {duplicadas}")
                 logger.info(f"   • Erros: {erros}")
                 logger.info(f"   • Histórico antigo preservado: {total_manter} ordens")
-                
+                logger.info(f"   • Estratégias preservadas: {len(estrategias_salvas)} ordens")
+
                 if erros > 0:
                     logger.warning(f"⚠️ {erros} ordens não puderam ser importadas")
                 

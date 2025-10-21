@@ -248,11 +248,43 @@ class BinanceAPI(ExchangeAPI):
         Cria ordem a mercado (auxiliar para place_ordem_compra/venda_market).
         """
         try:
-            # Formatar quantidade corretamente para ADAUSDT (step size = 0.1)
-            if simbolo.upper() == 'ADAUSDT':
-                quantidade_formatada = f"{quantidade:.1f}"
+            # Obter informações do símbolo para aplicar filtros corretos
+            info_simbolo = self.obter_info_simbolo(simbolo)
+
+            if info_simbolo:
+                # Encontrar o filtro LOT_SIZE
+                lot_size_filter = None
+                for filtro in info_simbolo.get('filters', []):
+                    if filtro['filterType'] == 'LOT_SIZE':
+                        lot_size_filter = filtro
+                        break
+
+                if lot_size_filter:
+                    step_size = float(lot_size_filter['stepSize'])
+
+                    # Arredondar quantidade para o stepSize mais próximo
+                    from decimal import Decimal, ROUND_DOWN
+                    quantidade_decimal = Decimal(str(quantidade))
+                    step_decimal = Decimal(str(step_size))
+
+                    # Calcular número de casas decimais do step_size
+                    step_str = f"{step_size:.8f}".rstrip('0')
+                    if '.' in step_str:
+                        decimais = len(step_str.split('.')[1])
+                    else:
+                        decimais = 0
+
+                    # Arredondar para baixo para múltiplo do stepSize
+                    quantidade_ajustada = (quantidade_decimal // step_decimal) * step_decimal
+                    quantidade_formatada = f"{float(quantidade_ajustada):.{decimais}f}"
+
+                    logger.debug(f"📏 Ajuste LOT_SIZE: {quantidade} → {quantidade_formatada} (step: {step_size})")
+                else:
+                    # Fallback se não encontrar LOT_SIZE
+                    quantidade_formatada = f"{quantidade:.8f}".rstrip('0').rstrip('.')
             else:
-                quantidade_formatada = str(quantidade)
+                # Fallback: formatar com precisão padrão
+                quantidade_formatada = f"{quantidade:.8f}".rstrip('0').rstrip('.')
 
             params = {
                 'symbol': simbolo.upper(),
@@ -401,37 +433,53 @@ class BinanceAPI(ExchangeAPI):
                 return
             
             # SINCRONIZAÇÃO INTELIGENTE:
-            # 1. Apagar APENAS ordens dos últimos 60 dias do banco local
-            # 2. Manter ordens mais antigas intactas
-            logger.info(f"🗑️ Removendo ordens dos últimos 60 dias do banco local (>= {inicio_data_str[:10]})...")
-            logger.info("📌 Ordens mais antigas serão preservadas")
-            
+            # 1. SALVAR estratégias das ordens recentes ANTES de apagar
+            # 2. Apagar APENAS ordens dos últimos 60 dias do banco local
+            # 3. Manter ordens mais antigas intactas
+            logger.info(f"🗑️ Preparando sincronização dos últimos 60 dias (>= {inicio_data_str[:10]})...")
+            logger.info("📌 Ordens mais antigas e estratégias serão preservadas")
+
+            # Dicionário para salvar estratégias: order_id -> estrategia
+            estrategias_salvas = {}
+
             with database_manager._conectar() as conn:
                 cursor = conn.cursor()
-                
+
+                # SALVAR estratégias das ordens que serão removidas
+                cursor.execute("""
+                    SELECT order_id, estrategia FROM ordens
+                    WHERE timestamp >= ? AND order_id IS NOT NULL AND estrategia IS NOT NULL
+                """, (inicio_data_str,))
+
+                for row in cursor.fetchall():
+                    order_id, estrategia = row
+                    estrategias_salvas[order_id] = estrategia
+
+                logger.info(f"💾 Salvando estratégias de {len(estrategias_salvas)} ordens")
+
                 # Contar ordens que serão removidas
                 cursor.execute("""
-                    SELECT COUNT(*) FROM ordens 
+                    SELECT COUNT(*) FROM ordens
                     WHERE timestamp >= ?
                 """, (inicio_data_str,))
                 total_remover = cursor.fetchone()[0]
-                
+
                 # Contar ordens antigas que serão mantidas
                 cursor.execute("""
-                    SELECT COUNT(*) FROM ordens 
+                    SELECT COUNT(*) FROM ordens
                     WHERE timestamp < ?
                 """, (inicio_data_str,))
                 total_manter = cursor.fetchone()[0]
-                
+
                 logger.info(f"   • Ordens a remover (últimos 60 dias): {total_remover}")
                 logger.info(f"   • Ordens a preservar (> 60 dias): {total_manter}")
-                
+
                 # Apagar apenas ordens dos últimos 60 dias
                 cursor.execute("""
-                    DELETE FROM ordens 
+                    DELETE FROM ordens
                     WHERE timestamp >= ?
                 """, (inicio_data_str,))
-                
+
                 logger.info("✅ Ordens recentes removidas, histórico antigo preservado")
             
             # Importar ordens do histórico da exchange (últimos 60 dias)
@@ -440,13 +488,40 @@ class BinanceAPI(ExchangeAPI):
                 ordens_binance=ordens_recentes,
                 recalcular_preco_medio=True
             )
-            
+
+            # RESTAURAR estratégias salvas
+            if estrategias_salvas:
+                logger.info(f"🔄 Restaurando estratégias de {len(estrategias_salvas)} ordens...")
+                restauradas = 0
+
+                with database_manager._conectar() as conn:
+                    cursor = conn.cursor()
+
+                    for order_id, estrategia in estrategias_salvas.items():
+                        try:
+                            cursor.execute("""
+                                UPDATE ordens
+                                SET estrategia = ?
+                                WHERE order_id = ? AND estrategia IS NULL
+                            """, (estrategia, str(order_id)))
+
+                            if cursor.rowcount > 0:
+                                restauradas += 1
+
+                        except Exception as e:
+                            logger.warning(f"⚠️ Erro ao restaurar estratégia para ordem {order_id}: {e}")
+
+                    conn.commit()
+
+                logger.info(f"✅ Estratégias restauradas: {restauradas}/{len(estrategias_salvas)}")
+
             logger.info(f"✅ Sincronização concluída:")
             logger.info(f"   • Importadas: {resultado['importadas']}")
             logger.info(f"   • Duplicadas: {resultado['duplicadas']}")
             logger.info(f"   • Erros: {resultado['erros']}")
             logger.info(f"   • Histórico antigo preservado: {total_manter} ordens")
-            
+            logger.info(f"   • Estratégias preservadas: {len(estrategias_salvas)} ordens")
+
             if resultado['erros'] > 0:
                 logger.warning(f"⚠️ {resultado['erros']} ordens não puderam ser importadas")
             

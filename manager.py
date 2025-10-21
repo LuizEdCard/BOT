@@ -466,20 +466,18 @@ def main():
                     # Gerar relatório completo usando a nova função
                     mensagem_relatorio = gerar_relatorio_detalhado(bot_workers, inicio_gerente)
 
-                    # Enviar mensagem via Telegram
+                    # Enviar mensagem via Telegram usando Notifier
                     try:
-                        if telegram_bot and telegram_bot.loop:
-                            future = asyncio.run_coroutine_threadsafe(
-                                telegram_bot.enviar_mensagem(
-                                    user_id=int(authorized_user_id),
-                                    mensagem=mensagem_relatorio
-                                ),
-                                telegram_bot.loop
-                            )
-                            future.result()  # Wait for the result
-                            logger.info("✅ Relatório horário enviado via Telegram com sucesso!")
+                        if notifier:
+                            sucesso = notifier.enviar_notificacao(mensagem_relatorio)
+                            if sucesso:
+                                logger.info("✅ Relatório horário enviado via Telegram com sucesso!")
+                            else:
+                                logger.warning("⚠️  Falha ao enviar relatório horário via Telegram")
+                                logger.info(f"📊 Conteúdo do relatório:\n{mensagem_relatorio}")
                         else:
-                            logger.warning("⚠️  Bot do Telegram não está em execução, não é possível enviar o relatório.")
+                            logger.warning("⚠️  Notifier não está configurado, não é possível enviar o relatório.")
+                            logger.info(f"📊 Conteúdo do relatório:\n{mensagem_relatorio}")
 
                     except Exception as e:
                         logger.error(f"❌ Erro ao enviar relatório via Telegram: {e}")

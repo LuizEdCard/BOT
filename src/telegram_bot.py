@@ -26,7 +26,7 @@ class TelegramBot:
         self.workers = workers
         self.shutdown_callback = shutdown_callback
         self.application = Application.builder().token(token).build()
-        self.loop = asyncio.get_event_loop()
+        self.loop = None  # Será definido quando run() for chamado
 
     def _format_status_message(self, status_dict):
         # Extrair dados principais
@@ -734,6 +734,9 @@ class TelegramBot:
         await self.application.bot.send_message(chat_id=user_id, text=mensagem)
 
     async def run(self):
+        # Armazenar o loop da thread do Telegram
+        self.loop = asyncio.get_running_loop()
+        
         self.application.add_handler(CommandHandler("start", self.start))
         self.application.add_handler(CommandHandler("status", self.status))
         self.application.add_handler(CommandHandler("saldo", self.saldo))

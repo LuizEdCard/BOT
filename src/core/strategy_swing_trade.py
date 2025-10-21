@@ -86,6 +86,8 @@ class StrategySwingTrade:
 
         # Estado interno
         self.preco_referencia_maxima: Optional[Decimal] = None  # Máxima recente para gatilho de compra
+        self.ultima_compra_timestamp: Optional[float] = None  # Timestamp da última compra para cooldown
+        self.cooldown_segundos: int = 60  # Cooldown mínimo entre compras (60 segundos)
 
         # Configurar alocação na gestão de capital
         self.gestao_capital.configurar_alocacao_giro_rapido(self.alocacao_capital_pct)
@@ -145,6 +147,14 @@ class StrategySwingTrade:
         """
         if self.preco_referencia_maxima is None:
             return None
+
+        # VERIFICAR COOLDOWN: Evitar múltiplas compras em sequência rápida
+        if self.ultima_compra_timestamp is not None:
+            import time
+            tempo_desde_ultima_compra = time.time() - self.ultima_compra_timestamp
+            if tempo_desde_ultima_compra < self.cooldown_segundos:
+                self.logger.debug(f"⏱️ Cooldown ativo: {int(self.cooldown_segundos - tempo_desde_ultima_compra)}s restantes")
+                return None
 
         # Calcular queda percentual desde a máxima
         queda_pct = ((self.preco_referencia_maxima - preco_atual) / self.preco_referencia_maxima) * Decimal('100')
@@ -284,9 +294,16 @@ class StrategySwingTrade:
         Args:
             oportunidade: Dados da oportunidade que foi executada
         """
+        import time
+
         # Resetar preço de referência após compra (nova base de cálculo)
         self.preco_referencia_maxima = oportunidade['preco_atual']
+
+        # Registrar timestamp da compra para ativar cooldown
+        self.ultima_compra_timestamp = time.time()
+
         self.logger.info(f"📈 Compra executada (Giro Rápido) - Nova referência: ${self.preco_referencia_maxima:.6f}")
+        self.logger.info(f"⏱️ Cooldown ativado: próxima compra permitida em {self.cooldown_segundos}s")
 
     def registrar_venda_executada(self, oportunidade: Dict[str, Any]):
         """
@@ -297,7 +314,12 @@ class StrategySwingTrade:
         """
         # Após venda, resetar estado
         self.preco_referencia_maxima = oportunidade['preco_atual']
+
+        # Resetar cooldown após venda (permitir nova compra imediatamente)
+        self.ultima_compra_timestamp = None
+
         self.logger.info(f"💰 Venda executada (Giro Rápido) - Ciclo completo. Lucro: {oportunidade.get('lucro_percentual', 0):.2f}%")
+        self.logger.info(f"✅ Cooldown resetado - nova compra permitida")
 
     def obter_estatisticas(self) -> Dict[str, Any]:
         """
