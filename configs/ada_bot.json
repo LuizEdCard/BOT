@@ -1,5 +1,5 @@
 {
-  "nome_instancia": "ADA_USDT_Bot",
+  "nome_instancia": "ADA",
   "exchange": "binance",
   "par": "ADA/USDT",
   "api_key_env": "BINANCE_API_KEY",
@@ -29,5 +29,15 @@
   },
   "DEGRAUS_COMPRA": [],
   "METAS_VENDA": [],
-  "VENDAS_DE_SEGURANCA": []
+  "VENDAS_DE_SEGURANCA": [],
+  "estrategia_giro_rapido": {
+    "habilitado": true,
+    "alocacao_capital_pct": 20,
+    "gatilho_compra_pct": 2.0,
+    "meta_lucro_pct": 3.5,
+    "protecao_lucro": {
+      "ativacao_pct": 2.0,
+      "venda_reversao_pct": 0.5
+    }
+  }
 }

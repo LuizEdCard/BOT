@@ -28,10 +28,15 @@ class GestaoCapital:
     """
     Gerenciador de capital com validação rigorosa de reserva
 
+    Suporta múltiplas carteiras lógicas:
+    - 'acumulacao': Carteira principal de acumulação (DCA)
+    - 'giro_rapido': Carteira de swing trade (operações rápidas)
+
     REGRAS:
     - Reserva obrigatória: 8% do capital total
     - Saldo mínimo: $5.00 USDT
     - Capital ativo: 92% disponível para trading
+    - Cada carteira tem seu próprio saldo alocado
     """
 
     def __init__(self, saldo_usdt: Decimal = Decimal('0'), valor_posicao_ada: Decimal = Decimal('0'), percentual_reserva: Decimal = Decimal('8')):
@@ -39,34 +44,72 @@ class GestaoCapital:
         Inicializar gestor de capital
 
         Args:
-            saldo_usdt: Saldo atual em USDT
-            valor_posicao_ada: Valor da posição em ADA (em USDT)
+            saldo_usdt: Saldo total atual em USDT
+            valor_posicao_ada: Valor da posição em ADA (em USDT) - carteira acumulação
             percentual_reserva: Percentual da reserva (padrão: 8%)
         """
         self.saldo_usdt = saldo_usdt
-        self.valor_posicao_ada = valor_posicao_ada
         self.percentual_reserva = percentual_reserva / Decimal('100')
         self.saldo_minimo = Decimal('5.00')
 
-    def atualizar_saldos(self, saldo_usdt: Decimal, valor_posicao_ada: Decimal = Decimal('0')):
+        # Carteiras separadas
+        self.carteiras = {
+            'acumulacao': {
+                'valor_posicao': valor_posicao_ada,
+                'saldo_alocado': Decimal('0')  # Calculado dinamicamente
+            },
+            'giro_rapido': {
+                'valor_posicao': Decimal('0'),
+                'saldo_alocado': Decimal('0')  # Percentual do saldo livre
+            }
+        }
+
+        # Configuração de alocação para giro_rapido (padrão 20%)
+        self.alocacao_giro_rapido_pct = Decimal('20')
+
+    def configurar_alocacao_giro_rapido(self, percentual: Decimal):
+        """
+        Configura o percentual de alocação para a carteira de giro rápido
+
+        Args:
+            percentual: Percentual do saldo livre a alocar para giro rápido
+        """
+        self.alocacao_giro_rapido_pct = percentual
+        logger.debug(f"⚙️ Alocação giro rápido configurada: {percentual}%")
+
+    def atualizar_saldos(self, saldo_usdt: Decimal, valor_posicao_ada: Decimal = Decimal('0'), carteira: str = 'acumulacao'):
         """
         Atualizar saldos para recálculo
 
         Args:
-            saldo_usdt: Novo saldo USDT
-            valor_posicao_ada: Novo valor da posição ADA
+            saldo_usdt: Novo saldo USDT total
+            valor_posicao_ada: Novo valor da posição (em USDT)
+            carteira: Nome da carteira ('acumulacao' ou 'giro_rapido')
         """
         self.saldo_usdt = saldo_usdt
-        self.valor_posicao_ada = valor_posicao_ada
+
+        if carteira in self.carteiras:
+            self.carteiras[carteira]['valor_posicao'] = valor_posicao_ada
+        else:
+            logger.warning(f"⚠️ Carteira '{carteira}' não reconhecida. Use 'acumulacao' ou 'giro_rapido'")
+
+    def get_valor_posicao_total(self) -> Decimal:
+        """
+        Retorna o valor total investido em todas as carteiras
+
+        Returns:
+            Valor total das posições em USDT
+        """
+        return sum(carteira['valor_posicao'] for carteira in self.carteiras.values())
 
     def calcular_capital_total(self) -> Decimal:
         """
-        Calcula capital total (USDT + posição ADA)
+        Calcula capital total (USDT + todas as posições)
 
         Returns:
             Capital total em USDT
         """
-        return self.saldo_usdt + self.valor_posicao_ada
+        return self.saldo_usdt + self.get_valor_posicao_total()
 
     def calcular_reserva_obrigatoria(self) -> Decimal:
         """
@@ -78,36 +121,67 @@ class GestaoCapital:
         capital_total = self.calcular_capital_total()
         return capital_total * self.percentual_reserva
 
-    def calcular_capital_disponivel(self) -> Decimal:
+    def calcular_capital_disponivel(self, carteira: str = 'acumulacao') -> Decimal:
         """
-        Calcula capital disponível para trading (92% do capital ativo)
+        Calcula capital disponível para trading por carteira
+
+        Args:
+            carteira: Nome da carteira ('acumulacao' ou 'giro_rapido')
 
         Returns:
-            Capital disponível em USDT
+            Capital disponível em USDT para a carteira especificada
         """
         reserva = self.calcular_reserva_obrigatoria()
-        return self.saldo_usdt - reserva
+        saldo_livre = self.saldo_usdt - reserva
 
-    def get_alocacao_percentual_ada(self) -> Decimal:
-        """Calcula o percentual do capital total que está alocado em ADA."""
+        if saldo_livre <= 0:
+            return Decimal('0')
+
+        if carteira == 'giro_rapido':
+            # Giro rápido usa um percentual do saldo livre
+            return saldo_livre * (self.alocacao_giro_rapido_pct / Decimal('100'))
+        elif carteira == 'acumulacao':
+            # Acumulação usa o restante do saldo livre
+            saldo_giro_rapido = saldo_livre * (self.alocacao_giro_rapido_pct / Decimal('100'))
+            return saldo_livre - saldo_giro_rapido
+        else:
+            logger.warning(f"⚠️ Carteira '{carteira}' desconhecida. Retornando 0.")
+            return Decimal('0')
+
+    def get_alocacao_percentual_ada(self, carteira: str = 'acumulacao') -> Decimal:
+        """
+        Calcula o percentual do capital total que está alocado em ADA por carteira
+
+        Args:
+            carteira: Nome da carteira ('acumulacao' ou 'giro_rapido')
+
+        Returns:
+            Percentual de alocação
+        """
         capital_total = self.calcular_capital_total()
         if capital_total <= 0:
             return Decimal('0')
 
-        # self.valor_posicao_ada é o valor da posição ADA em USDT
-        return (self.valor_posicao_ada / capital_total) * Decimal('100')
+        if carteira in self.carteiras:
+            valor_posicao = self.carteiras[carteira]['valor_posicao']
+            return (valor_posicao / capital_total) * Decimal('100')
+        else:
+            # Retornar total de todas as carteiras
+            valor_total_posicoes = self.get_valor_posicao_total()
+            return (valor_total_posicoes / capital_total) * Decimal('100')
 
-    def pode_comprar(self, valor_operacao: Decimal) -> Tuple[bool, str]:
+    def pode_comprar(self, valor_operacao: Decimal, carteira: str = 'acumulacao') -> Tuple[bool, str]:
         """
-        Valida se pode comprar sem violar reserva.
+        Valida se pode comprar sem violar reserva, respeitando alocação por carteira.
 
         VALIDAÇÕES:
-        1. Capital disponível suficiente (descontando reserva)
-        2. Saldo após compra mantém reserva
+        1. Capital disponível suficiente para a carteira especificada
+        2. Saldo após compra mantém reserva global
         3. Saldo após compra >= $5.00
 
         Args:
             valor_operacao: Valor da operação em USDT
+            carteira: Nome da carteira ('acumulacao' ou 'giro_rapido')
 
         Returns:
             (pode: bool, motivo: str)
@@ -119,16 +193,16 @@ class GestaoCapital:
         logger.debug(f"💰 Capital total: ${capital_total:.2f}")
         logger.debug(f"🛡️ Reserva obrigatória (8%): ${reserva_obrigatoria:.2f}")
 
-        # 2. Capital disponível (descontando reserva)
-        capital_disponivel = self.calcular_capital_disponivel()
+        # 2. Capital disponível para a carteira específica
+        capital_disponivel = self.calcular_capital_disponivel(carteira)
 
-        logger.debug(f"✅ Capital disponível: ${capital_disponivel:.2f}")
+        logger.debug(f"✅ Capital disponível ({carteira}): ${capital_disponivel:.2f}")
         logger.debug(f"🎯 Valor operação: ${valor_operacao:.2f}")
 
-        # 3. Verificar se tem saldo disponível
+        # 3. Verificar se tem saldo disponível na carteira
         if capital_disponivel < valor_operacao:
             motivo = (
-                f"Capital ativo insuficiente: ${capital_disponivel:.2f} < ${valor_operacao:.2f} "
+                f"Capital insuficiente na carteira '{carteira}': ${capital_disponivel:.2f} < ${valor_operacao:.2f} "
                 f"(Reserva protegida: ${reserva_obrigatoria:.2f})"
             )
             logger.warning(f"⚠️ {motivo}")
@@ -155,7 +229,7 @@ class GestaoCapital:
             return False, motivo
 
         # ✅ APROVADO
-        logger.debug(f"✅ Operação aprovada: ${valor_operacao:.2f}")
+        logger.debug(f"✅ Operação aprovada ({carteira}): ${valor_operacao:.2f}")
         logger.debug(f"   Saldo após: ${saldo_apos:.2f} (reserva: ${reserva_obrigatoria:.2f})")
 
         return True, ""
@@ -180,39 +254,55 @@ class GestaoCapital:
 
     def obter_resumo(self) -> dict:
         """
-        Obtém resumo do capital e reserva
+        Obtém resumo do capital e reserva com detalhamento por carteira
 
         Returns:
             Dicionário com informações do capital
         """
         capital_total = self.calcular_capital_total()
         reserva_obrigatoria = self.calcular_reserva_obrigatoria()
-        capital_disponivel = self.calcular_capital_disponivel()
+        capital_disponivel_acumulacao = self.calcular_capital_disponivel('acumulacao')
+        capital_disponivel_giro = self.calcular_capital_disponivel('giro_rapido')
 
         return {
             'saldo_usdt': self.saldo_usdt,
-            'valor_posicao_ada': self.valor_posicao_ada,
             'capital_total': capital_total,
             'reserva_obrigatoria': reserva_obrigatoria,
-            'capital_disponivel': capital_disponivel,
             'percentual_reserva': float(self.percentual_reserva * 100),
-            'saldo_minimo': self.saldo_minimo
+            'saldo_minimo': self.saldo_minimo,
+            'carteiras': {
+                'acumulacao': {
+                    'valor_posicao': self.carteiras['acumulacao']['valor_posicao'],
+                    'capital_disponivel': capital_disponivel_acumulacao
+                },
+                'giro_rapido': {
+                    'valor_posicao': self.carteiras['giro_rapido']['valor_posicao'],
+                    'capital_disponivel': capital_disponivel_giro,
+                    'alocacao_pct': float(self.alocacao_giro_rapido_pct)
+                }
+            }
         }
 
     def log_resumo(self):
-        """Exibe resumo do capital no log"""
+        """Exibe resumo do capital no log com detalhamento por carteira"""
         resumo = self.obter_resumo()
 
         logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        logger.info("💰 GESTÃO DE CAPITAL")
+        logger.info("💰 GESTÃO DE CAPITAL (Múltiplas Carteiras)")
         logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        logger.info(f"   Saldo USDT: ${resumo['saldo_usdt']:.2f}")
-        logger.info(f"   Posição ADA: ${resumo['valor_posicao_ada']:.2f}")
+        logger.info(f"   Saldo USDT Total: ${resumo['saldo_usdt']:.2f}")
         logger.info(f"   Capital Total: ${resumo['capital_total']:.2f}")
         logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         logger.info(f"   🛡️ Reserva ({resumo['percentual_reserva']:.0f}%): ${resumo['reserva_obrigatoria']:.2f}")
-        logger.info(f"   ✅ Disponível (92%): ${resumo['capital_disponivel']:.2f}")
         logger.info(f"   ⚠️ Mínimo obrigatório: ${resumo['saldo_minimo']:.2f}")
+        logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        logger.info("   📊 CARTEIRA ACUMULAÇÃO:")
+        logger.info(f"      Posição: ${resumo['carteiras']['acumulacao']['valor_posicao']:.2f}")
+        logger.info(f"      Disponível: ${resumo['carteiras']['acumulacao']['capital_disponivel']:.2f}")
+        logger.info("   📈 CARTEIRA GIRO RÁPIDO:")
+        logger.info(f"      Posição: ${resumo['carteiras']['giro_rapido']['valor_posicao']:.2f}")
+        logger.info(f"      Disponível: ${resumo['carteiras']['giro_rapido']['capital_disponivel']:.2f}")
+        logger.info(f"      Alocação: {resumo['carteiras']['giro_rapido']['alocacao_pct']:.0f}%")
         logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 

@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import time
 import queue
+import logging
 from decimal import Decimal
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any
@@ -23,6 +24,7 @@ from src.core.gestao_capital import GestaoCapital
 from src.core.position_manager import PositionManager
 from src.core.strategy_dca import StrategyDCA
 from src.core.strategy_sell import StrategySell
+from src.core.strategy_swing_trade import StrategySwingTrade
 from src.persistencia.database import DatabaseManager
 from src.persistencia.state_manager import StateManager
 from src.utils.logger import get_loggers
@@ -32,18 +34,41 @@ from src.utils.constants import Icones, LogConfig
 class BotWorker:
     """Bot Worker - Orquestrador de Estratégias de Trading"""
 
-    def __init__(self, config: Dict[str, Any], exchange_api: ExchangeAPI, telegram_notifier=None):
-        """Inicializar bot worker"""
+    def __init__(self, config: Dict[str, Any], exchange_api: ExchangeAPI, telegram_notifier=None, notifier=None):
+        """
+        Inicializar bot worker
+
+        Args:
+            config: Configuração do bot
+            exchange_api: Instância da API de exchange
+            telegram_notifier: Instância do TelegramBot (legado)
+            notifier: Instância do Notifier para notificações proativas
+        """
         self.config = config
         self.exchange_api = exchange_api
         self.telegram_notifier = telegram_notifier
+        self.notifier = notifier
 
-        self.logger, self.panel_logger = get_loggers(
+        main_logger, self.panel_logger = get_loggers(
             nome=self.config.get('BOT_NAME', 'BotWorker'),
             log_dir=Path('logs'),
             config=LogConfig.DEFAULT,
             console=True
         )
+
+        # Store the main logger for banner methods
+        self.main_logger = main_logger
+
+        # Criar LoggerAdapters contextuais para o worker e cada especialista
+        nome_instancia = self.config.get('nome_instancia', self.config.get('BOT_NAME', 'BotWorker'))
+
+        # Logger do worker com contexto
+        self.logger = logging.LoggerAdapter(main_logger.logger, {'context': nome_instancia})
+
+        # Loggers contextuais para especialistas
+        dca_logger = logging.LoggerAdapter(main_logger.logger, {'context': f"{nome_instancia}-StrategyDCA"})
+        sell_logger = logging.LoggerAdapter(main_logger.logger, {'context': f"{nome_instancia}-StrategySell"})
+        swing_logger = logging.LoggerAdapter(main_logger.logger, {'context': f"{nome_instancia}-StrategySwing"})
 
         # Componentes auxiliares
         self.gerenciador_aportes = GerenciadorAportes(self.exchange_api, self.config)
@@ -61,23 +86,35 @@ class BotWorker:
         # ═══════════════════════════════════════
         # NOVA ARQUITETURA: Componentes Estratégicos
         # ═══════════════════════════════════════
-        
+
         # Gerenciador de posições
         self.position_manager = PositionManager(self.db)
-        
-        # Estratégias
+
+        # Estratégias (agora com loggers contextuais)
         self.strategy_dca = StrategyDCA(
             config=self.config,
             position_manager=self.position_manager,
             gestao_capital=self.gestao_capital,
             state_manager=self.state,
-            worker=self
+            worker=self,
+            logger=dca_logger,
+            notifier=self.notifier
         )
-        
+
         self.strategy_sell = StrategySell(
             config=self.config,
             position_manager=self.position_manager,
-            state_manager=self.state
+            state_manager=self.state,
+            logger=sell_logger
+        )
+
+        # Estratégia de Giro Rápido (Swing Trade)
+        self.strategy_swing_trade = StrategySwingTrade(
+            config=self.config,
+            position_manager=self.position_manager,
+            gestao_capital=self.gestao_capital,
+            logger=swing_logger,
+            notifier=self.notifier
         )
 
         # Estado do bot
@@ -109,9 +146,10 @@ class BotWorker:
         self.ja_avisou_sem_saldo: bool = False
         
         self.logger.info(f"🤖 BotWorker inicializado com arquitetura de estratégias")
-        self.logger.info(f"   📊 PositionManager: {'COM POSIÇÃO' if self.position_manager.tem_posicao() else 'SEM POSIÇÃO'}")
+        self.logger.info(f"   📊 PositionManager (acumulação): {'COM POSIÇÃO' if self.position_manager.tem_posicao('acumulacao') else 'SEM POSIÇÃO'}")
         self.logger.info(f"   🎯 StrategyDCA: {len(self.strategy_dca.degraus_compra)} degraus")
         self.logger.info(f"   💰 StrategySell: {len(self.strategy_sell.metas_venda)} metas")
+        self.logger.info(f"   📈 StrategySwingTrade: {'HABILITADA' if self.strategy_swing_trade.habilitado else 'DESABILITADA'}")
 
     def _sincronizar_saldos_exchange(self):
         """
@@ -178,7 +216,7 @@ class BotWorker:
                     else:
                         self.logger.warning(f"⚠️ Ainda há divergência de {diferenca_pos_correcao:.2f} {base_currency} após correção")
                         self.logger.warning("⚠️ Forçando a quantidade da posição para o saldo real da exchange.")
-                        self.position_manager.forcar_quantidade(Decimal(str(saldo_base_real)))
+                        self.position_manager.forcar_quantidade(Decimal(str(saldo_base_real)), 'acumulacao')
                     
                 except Exception as erro_correcao:
                     self.logger.error(f"❌ Erro durante auto-correção: {erro_correcao}")
@@ -326,10 +364,10 @@ class BotWorker:
     def _executar_oportunidade_compra(self, oportunidade: Dict[str, Any]) -> bool:
         """
         Executa uma oportunidade de compra identificada pela estratégia
-        
+
         Args:
             oportunidade: Dados da oportunidade retornados pela estratégia
-            
+
         Returns:
             bool: True se compra foi executada com sucesso
         """
@@ -337,11 +375,12 @@ class BotWorker:
         if self.compras_pausadas_manualmente:
             self.logger.debug("⏸️  Compra bloqueada: compras pausadas manualmente")
             return False
-        
+
         try:
             tipo = oportunidade['tipo']
             quantidade = oportunidade['quantidade']
             preco_atual = oportunidade['preco_atual']
+            carteira = oportunidade.get('carteira', 'acumulacao')  # Padrão: acumulacao
             
             self.logger.info(f"🎯 Executando oportunidade de compra: {oportunidade['motivo']}")
             
@@ -363,16 +402,30 @@ class BotWorker:
                     queda_pct=float(oportunidade.get('distancia_sma', 0))
                 )
 
+                # Notificação com identificação da carteira
                 if self.telegram_notifier and self.telegram_notifier.loop:
-                    mensagem = f"✅ COMPRA REALIZADA: {quantidade_real:.2f} {self.config['par'].split('/')[0]} @ ${preco_real:.4f}"
+                    carteira_emoji = "📊" if carteira == 'acumulacao' else "🎯"
+                    carteira_nome = "Acumulação" if carteira == 'acumulacao' else "Giro Rápido"
+                    mensagem = f"✅ COMPRA REALIZADA [{carteira_emoji} {carteira_nome}]\n{quantidade_real:.2f} {self.config['par'].split('/')[0]} @ ${preco_real:.4f}"
                     future = asyncio.run_coroutine_threadsafe(self.telegram_notifier.enviar_mensagem(self.telegram_notifier.authorized_user_id, mensagem), self.telegram_notifier.loop)
                     future.result()
 
-                # Atualizar position manager
-                self.position_manager.atualizar_apos_compra(quantidade_real, preco_real)
+                # Atualizar position manager (com carteira correta)
+                self.position_manager.atualizar_apos_compra(quantidade_real, preco_real, carteira)
 
                 # Registrar na estratégia para ativar cooldowns
-                self.strategy_dca.registrar_compra_executada(oportunidade, quantidade_real)
+                if carteira == 'acumulacao':
+                    self.strategy_dca.registrar_compra_executada(oportunidade, quantidade_real)
+                elif carteira == 'giro_rapido':
+                    self.strategy_swing_trade.registrar_compra_executada(oportunidade)
+
+                # Determinar estratégia com base na carteira
+                estrategia_nome = 'acumulacao' if carteira == 'acumulacao' else 'giro_rapido'
+
+                # Extrair order_id com fallback para diferentes exchanges
+                order_id = ordem.get('orderId') or ordem.get('id')
+                if not order_id:
+                    self.logger.warning(f"⚠️ Ordem de COMPRA executada mas sem ID retornado pela exchange")
 
                 # Salvar no banco de dados
                 self._salvar_ordem_banco({
@@ -383,9 +436,9 @@ class BotWorker:
                     'valor_total': quantidade_real * preco_real,
                     'taxa': ordem.get('fills', [{}])[0].get('commission', 0) if ordem.get('fills') else 0,
                     'meta': str(oportunidade.get('degrau', 'oportunidade')),
-                    'order_id': ordem.get('orderId'),
+                    'order_id': order_id,
                     'observacao': f"{tipo.upper()}: {oportunidade['motivo']}"
-                })
+                }, estrategia=estrategia_nome)
 
                 return True
             else:
@@ -399,10 +452,10 @@ class BotWorker:
     def _executar_oportunidade_venda(self, oportunidade: Dict[str, Any]) -> bool:
         """
         Executa uma oportunidade de venda identificada pela estratégia
-        
+
         Args:
             oportunidade: Dados da oportunidade retornados pela estratégia
-            
+
         Returns:
             bool: True se venda foi executada com sucesso
         """
@@ -410,6 +463,7 @@ class BotWorker:
             tipo = oportunidade['tipo']
             quantidade = oportunidade['quantidade_venda']
             preco_atual = oportunidade['preco_atual']
+            carteira = oportunidade.get('carteira', 'acumulacao')  # Padrão: acumulacao
             
             self.logger.info(f"💰 Executando oportunidade de venda: {oportunidade['motivo']}")
             
@@ -424,11 +478,12 @@ class BotWorker:
                 valor_real = Decimal(str(ordem.get('cummulativeQuoteQty', '0')))
                 preco_real = valor_real / quantidade_real if quantidade_real > 0 else preco_atual
 
-                # Calcular lucro se possível
-                preco_medio = self.position_manager.get_preco_medio()
-                lucro_pct = 0
-                lucro_usdt = 0
-                
+                # Calcular lucro ANTES de atualizar PositionManager
+                # IMPORTANTE: Usar PM da carteira que está vendendo
+                preco_medio = self.position_manager.get_preco_medio(carteira)
+                lucro_pct = Decimal('0')
+                lucro_usdt = Decimal('0')
+
                 if preco_medio:
                     lucro_pct = ((preco_real - preco_medio) / preco_medio) * Decimal('100')
                     lucro_usdt = (preco_real - preco_medio) * quantidade_real
@@ -442,16 +497,30 @@ class BotWorker:
                     lucro_usd=float(lucro_usdt)
                 )
 
+                # Notificação com identificação da carteira
                 if self.telegram_notifier and self.telegram_notifier.loop:
-                    mensagem = f"✅ VENDA REALIZADA: {quantidade_real:.2f} {self.config['par'].split('/')[0]} @ ${preco_real:.4f} | Lucro: ${lucro_usdt:.2f} ({lucro_pct:.2f}%)"
+                    carteira_emoji = "📊" if carteira == 'acumulacao' else "🎯"
+                    carteira_nome = "Acumulação" if carteira == 'acumulacao' else "Giro Rápido"
+                    mensagem = f"✅ VENDA REALIZADA [{carteira_emoji} {carteira_nome}]\n{quantidade_real:.2f} {self.config['par'].split('/')[0]} @ ${preco_real:.4f}\nLucro: ${lucro_usdt:.2f} ({lucro_pct:.2f}%)"
                     future = asyncio.run_coroutine_threadsafe(self.telegram_notifier.enviar_mensagem(self.telegram_notifier.authorized_user_id, mensagem), self.telegram_notifier.loop)
                     future.result()
 
-                # Atualizar position manager
-                self.position_manager.atualizar_apos_venda(quantidade_real)
+                # Atualizar position manager (com carteira correta)
+                self.position_manager.atualizar_apos_venda(quantidade_real, carteira)
 
                 # Registrar na estratégia
-                self.strategy_sell.registrar_venda_executada(oportunidade, quantidade_real)
+                if carteira == 'acumulacao':
+                    self.strategy_sell.registrar_venda_executada(oportunidade, quantidade_real)
+                elif carteira == 'giro_rapido':
+                    self.strategy_swing_trade.registrar_venda_executada(oportunidade)
+
+                # Determinar estratégia com base na carteira
+                estrategia_nome = 'acumulacao' if carteira == 'acumulacao' else 'giro_rapido'
+
+                # Extrair order_id com fallback para diferentes exchanges
+                order_id = ordem.get('orderId') or ordem.get('id')
+                if not order_id:
+                    self.logger.warning(f"⚠️ Ordem de VENDA executada mas sem ID retornado pela exchange")
 
                 # Salvar no banco de dados
                 self._salvar_ordem_banco({
@@ -464,9 +533,9 @@ class BotWorker:
                     'meta': str(oportunidade.get('meta', oportunidade.get('zona_nome', 'venda'))),
                     'lucro_percentual': lucro_pct,
                     'lucro_usdt': lucro_usdt,
-                    'order_id': ordem.get('orderId'),
+                    'order_id': order_id,
                     'observacao': f"{tipo.upper()}: {oportunidade['motivo']}"
-                })
+                }, estrategia=estrategia_nome)
 
                 return True
             else:
@@ -518,7 +587,12 @@ class BotWorker:
                 # Registrar na estratégia de vendas
                 self.strategy_sell.registrar_recompra_executada(oportunidade)
 
-                # Salvar no banco de dados
+                # Extrair order_id com fallback para diferentes exchanges
+                order_id = ordem.get('orderId') or ordem.get('id')
+                if not order_id:
+                    self.logger.warning(f"⚠️ Ordem de RECOMPRA executada mas sem ID retornado pela exchange")
+
+                # Salvar no banco de dados (recompras são sempre da estratégia de acumulação)
                 self._salvar_ordem_banco({
                     'tipo': 'COMPRA',
                     'par': self.config['par'],
@@ -527,9 +601,9 @@ class BotWorker:
                     'valor_total': valor_real,
                     'taxa': ordem.get('fills', [{}])[0].get('commission', 0) if ordem.get('fills') else 0,
                     'meta': f"recompra_{oportunidade['zona_nome']}",
-                    'order_id': ordem.get('orderId'),
+                    'order_id': order_id,
                     'observacao': f"RECOMPRA: {oportunidade['motivo']}"
-                })
+                }, estrategia='acumulacao')
 
                 return True
             else:
@@ -540,15 +614,16 @@ class BotWorker:
             self.logger.error(f"❌ Erro ao executar recompra: {e}")
             return False
 
-    def _salvar_ordem_banco(self, ordem_dados: Dict[str, Any]):
+    def _salvar_ordem_banco(self, ordem_dados: Dict[str, Any], estrategia: str):
         """
         Salva ordem no banco de dados
-        
+
         Args:
             ordem_dados: Dados da ordem para salvar
+            estrategia: Nome da estratégia ('acumulacao' ou 'giro_rapido')
         """
         try:
-            # Adicionar dados de posição antes/depois
+            # Adicionar dados de posição antes/depois e estratégia
             ordem_dados.update({
                 'preco_medio_antes': self.position_manager.get_preco_medio(),
                 'preco_medio_depois': self.position_manager.get_preco_medio(),
@@ -556,10 +631,11 @@ class BotWorker:
                 'saldo_ada_depois': self.position_manager.get_quantidade_total(),
                 'saldo_usdt_antes': Decimal('0'),  # Placeholder
                 'saldo_usdt_depois': Decimal('0'),  # Placeholder
+                'estrategia': estrategia
             })
-            
+
             self.db.registrar_ordem(ordem_dados)
-            
+
         except Exception as e:
             self.logger.error(f"❌ Erro ao salvar ordem no banco: {e}")
 
@@ -598,7 +674,7 @@ class BotWorker:
         Loop principal simplificado do bot worker
         """
         try:
-            self.logger.banner("🤖 BOT DE TRADING INICIADO")
+            self.main_logger.banner("🤖 BOT DE TRADING INICIADO")
             self.logger.info(f"Par: {self.config['par']}")
             self.logger.info(f"Ambiente: {self.config['AMBIENTE']}")
             self.logger.info(f"Capital inicial: ${self.config['CAPITAL_INICIAL']}")
@@ -641,7 +717,7 @@ class BotWorker:
                         if distancia_sma:
                             self.logger.info(f"📉 Distância da SMA: {distancia_sma:.2f}%")
 
-                    # 2. Verificar oportunidade de compra (DCA)
+                    # 2. Verificar oportunidade de compra (DCA) - Carteira Acumulação
                     if distancia_sma:
                         oportunidade_compra = self.strategy_dca.verificar_oportunidade(
                             preco_atual=preco_atual,
@@ -650,20 +726,36 @@ class BotWorker:
 
                         if oportunidade_compra:
                             if self._executar_oportunidade_compra(oportunidade_compra):
-                                self.logger.info("✅ Compra executada com sucesso!")
+                                self.logger.info("✅ Compra executada com sucesso (Acumulação)!")
                                 time.sleep(10)  # Pausa após compra
                                 continue
 
-                    # 3. Verificar oportunidade de venda
+                    # 2b. Verificar oportunidade de Swing Trade (Giro Rápido)
+                    if self.strategy_swing_trade.habilitado:
+                        oportunidade_swing = self.strategy_swing_trade.verificar_oportunidade(preco_atual)
+
+                        if oportunidade_swing:
+                            if oportunidade_swing['tipo'] == 'compra':
+                                if self._executar_oportunidade_compra(oportunidade_swing):
+                                    self.logger.info("✅ Compra executada com sucesso (Giro Rápido)!")
+                                    time.sleep(10)
+                                    continue
+                            elif oportunidade_swing['tipo'] == 'venda':
+                                if self._executar_oportunidade_venda(oportunidade_swing):
+                                    self.logger.info("✅ Venda executada com sucesso (Giro Rápido)!")
+                                    time.sleep(10)
+                                    continue
+
+                    # 3. Verificar oportunidade de venda - Carteira Acumulação
                     oportunidade_venda = self.strategy_sell.verificar_oportunidade(preco_atual)
 
                     if oportunidade_venda:
                         if self._executar_oportunidade_venda(oportunidade_venda):
-                            self.logger.info("✅ Venda executada com sucesso!")
+                            self.logger.info("✅ Venda executada com sucesso (Acumulação)!")
                             time.sleep(10)  # Pausa após venda
                             continue
 
-                    # 4. Verificar recompras de segurança
+                    # 4. Verificar recompras de segurança - Carteira Acumulação
                     oportunidade_recompra = self.strategy_sell.verificar_recompra_de_seguranca(preco_atual)
 
                     if oportunidade_recompra:
@@ -712,23 +804,69 @@ class BotWorker:
                 future.result()
         finally:
             self.rodando = False
-            self.logger.banner("🛑 BOT FINALIZADO")
+            self.main_logger.banner("🛑 BOT FINALIZADO")
 
     def get_status_dict(self) -> Dict[str, Any]:
         """
         Coleta e retorna um dicionário com o estado atual do bot.
         Inclui estatísticas das últimas 24h e status da thread.
+        Agora inclui informações de AMBAS as carteiras: acumulacao e giro_rapido.
         """
         try:
             preco_atual = self._obter_preco_atual_seguro()
-            lucro_atual = self.position_manager.calcular_lucro_atual(preco_atual)
-            quantidade_total = self.position_manager.get_quantidade_total()
-            valor_total_atual = quantidade_total * preco_atual
-            valor_investido = self.position_manager.get_valor_total_investido()
-            lucro_usdt = valor_total_atual - valor_investido
-
             base_currency, _ = self.config['par'].split('/')
             saldo_disponivel_usdt = self.gestao_capital.saldo_usdt
+
+            # ═══════════════════════════════════════
+            # CARTEIRA ACUMULAÇÃO
+            # ═══════════════════════════════════════
+            quantidade_acumulacao = self.position_manager.get_quantidade_total('acumulacao')
+            preco_medio_acumulacao = self.position_manager.get_preco_medio('acumulacao')
+            valor_investido_acumulacao = self.position_manager.get_valor_total_investido('acumulacao')
+            valor_total_acumulacao = quantidade_acumulacao * preco_atual
+            lucro_atual_acumulacao = self.position_manager.calcular_lucro_atual(preco_atual, 'acumulacao')
+            lucro_usdt_acumulacao = valor_total_acumulacao - valor_investido_acumulacao
+
+            status_posicao_acumulacao = {
+                'quantidade': quantidade_acumulacao,
+                'preco_medio': preco_medio_acumulacao,
+                'valor_total': valor_total_acumulacao,
+                'lucro_percentual': lucro_atual_acumulacao,
+                'lucro_usdt': lucro_usdt_acumulacao
+            }
+
+            # ═══════════════════════════════════════
+            # CARTEIRA GIRO RÁPIDO
+            # ═══════════════════════════════════════
+            quantidade_giro = self.position_manager.get_quantidade_total('giro_rapido')
+            preco_medio_giro = self.position_manager.get_preco_medio('giro_rapido')
+            valor_investido_giro = self.position_manager.get_valor_total_investido('giro_rapido')
+            valor_total_giro = quantidade_giro * preco_atual
+            lucro_atual_giro = self.position_manager.calcular_lucro_atual(preco_atual, 'giro_rapido')
+            lucro_usdt_giro = valor_total_giro - valor_investido_giro
+            high_water_mark_giro = self.position_manager.get_high_water_mark('giro_rapido')
+
+            status_posicao_giro_rapido = {
+                'quantidade': quantidade_giro,
+                'preco_medio': preco_medio_giro,
+                'valor_total': valor_total_giro,
+                'lucro_percentual': lucro_atual_giro,
+                'lucro_usdt': lucro_usdt_giro,
+                'high_water_mark': high_water_mark_giro
+            }
+
+            # ═══════════════════════════════════════
+            # TOTAIS CONSOLIDADOS
+            # ═══════════════════════════════════════
+            quantidade_total = quantidade_acumulacao + quantidade_giro
+            valor_total_atual = valor_total_acumulacao + valor_total_giro
+            valor_investido_total = valor_investido_acumulacao + valor_investido_giro
+            lucro_usdt_total = valor_total_atual - valor_investido_total
+
+            # Calcular lucro percentual consolidado
+            lucro_atual_consolidado = None
+            if valor_investido_total > 0:
+                lucro_atual_consolidado = ((valor_total_atual - valor_investido_total) / valor_investido_total) * Decimal('100')
 
             # Lógica de estado inteligente
             estado_bot = 'Operando | Aguardando Oportunidade'
@@ -740,12 +878,13 @@ class BotWorker:
                 if alocacao_atual > limite_exposicao:
                     estado_bot = 'Exposição Máxima | Compras Suspensas'
 
+            # Status consolidado (mantido para compatibilidade)
             status_posicao = {
                 'quantidade': quantidade_total,
-                'preco_medio': self.position_manager.get_preco_medio(),
+                'preco_medio': preco_medio_acumulacao,  # Usa PM da acumulação como principal
                 'valor_total': valor_total_atual,
-                'lucro_percentual': lucro_atual,
-                'lucro_usdt': lucro_usdt
+                'lucro_percentual': lucro_atual_consolidado,
+                'lucro_usdt': lucro_usdt_total
             }
 
             # Estatísticas das últimas 24h
@@ -766,6 +905,8 @@ class BotWorker:
                 'par': self.config['par'],
                 'preco_atual': preco_atual,
                 'status_posicao': status_posicao,
+                'status_posicao_acumulacao': status_posicao_acumulacao,
+                'status_posicao_giro_rapido': status_posicao_giro_rapido,
                 'estado_bot': estado_bot,
                 'sma_referencia': self.sma_referencia,
                 'distancia_sma': self._calcular_distancia_sma(preco_atual),

@@ -34,34 +34,71 @@ class TelegramBot:
         par = status_dict.get('par', 'N/A')
         estado_bot = status_dict.get('estado_bot', 'N/A')
         preco_atual = status_dict.get('preco_atual', 0)
-
-        # Extrair dados da posição
-        posicao = status_dict.get('status_posicao', {})
-        quantidade_posicao = posicao.get('quantidade', 0)
-        preco_medio = posicao.get('preco_medio', 0)
-        lucro_percentual = posicao.get('lucro_percentual', 0)
-        lucro_usdt = posicao.get('lucro_usdt', 0)
+        base_currency = par.split('/')[0]
 
         # Extrair dados da última compra
         ultima_compra = status_dict.get('ultima_compra')
         compra_str = "N/A"
         if ultima_compra:
-            compra_str = f"{ultima_compra.get('quantidade', 0):.2f} {par.split('/')[0]} @ ${ultima_compra.get('preco', 0):.4f} em {ultima_compra.get('timestamp', 'N/A')}"
+            compra_str = f"{ultima_compra.get('quantidade', 0):.2f} {base_currency} @ ${ultima_compra.get('preco', 0):.4f} em {ultima_compra.get('timestamp', 'N/A')}"
 
         # Extrair dados da última venda
         ultima_venda = status_dict.get('ultima_venda')
         venda_str = "N/A"
         if ultima_venda:
-            venda_str = f"{ultima_venda.get('quantidade', 0):.2f} {par.split('/')[0]} @ ${ultima_venda.get('preco', 0):.4f} em {ultima_venda.get('timestamp', 'N/A')}"
+            venda_str = f"{ultima_venda.get('quantidade', 0):.2f} {base_currency} @ ${ultima_venda.get('preco', 0):.4f} em {ultima_venda.get('timestamp', 'N/A')}"
 
         # Montar a mensagem formatada
         message = (
             f"🤖 **Bot: {nome_instancia} ({par})**\n"
             f"🧠 **Estado:** {estado_bot}\n\n"
             f"📈 **Preço Atual:** ${preco_atual:.4f}\n"
-            f"📊 **Posição:** {quantidade_posicao:.2f} {par.split('/')[0]} @ ${preco_medio:.4f} (PM)\n"
-            f"💹 **L/P Posição:** {lucro_percentual:.2f}% (${lucro_usdt:.2f})\n\n"
-            f"🟢 **Última Compra:** {compra_str}\n"
+        )
+
+        # Adicionar informações da carteira de Acumulação
+        posicao_acumulacao = status_dict.get('status_posicao_acumulacao', {})
+        quantidade_acumulacao = posicao_acumulacao.get('quantidade', 0)
+
+        if quantidade_acumulacao and quantidade_acumulacao > 0:
+            preco_medio_acum = posicao_acumulacao.get('preco_medio', 0)
+            lucro_percentual_acum = posicao_acumulacao.get('lucro_percentual', 0)
+            lucro_usdt_acum = posicao_acumulacao.get('lucro_usdt', 0)
+
+            # Garantir que valores não sejam None antes de formatar
+            preco_medio_acum = preco_medio_acum if preco_medio_acum is not None else 0
+            lucro_percentual_acum = lucro_percentual_acum if lucro_percentual_acum is not None else 0
+            lucro_usdt_acum = lucro_usdt_acum if lucro_usdt_acum is not None else 0
+
+            message += (
+                f"📊 **Posição Acumulação:** {quantidade_acumulacao:.2f} {base_currency} @ ${preco_medio_acum:.4f} (PM)\n"
+                f"💹 **L/P Acumulação:** {lucro_percentual_acum:.2f}% (${lucro_usdt_acum:.2f})\n"
+            )
+        else:
+            message += "📊 **Posição Acumulação:** Nenhuma Posição Aberta\n"
+
+        # Adicionar informações da carteira de Giro Rápido (Especulação)
+        posicao_giro = status_dict.get('status_posicao_giro_rapido', {})
+        quantidade_giro = posicao_giro.get('quantidade', 0)
+
+        if quantidade_giro and quantidade_giro > 0:
+            preco_medio_giro = posicao_giro.get('preco_medio', 0)
+            lucro_percentual_giro = posicao_giro.get('lucro_percentual', 0)
+            lucro_usdt_giro = posicao_giro.get('lucro_usdt', 0)
+
+            # Garantir que valores não sejam None antes de formatar
+            preco_medio_giro = preco_medio_giro if preco_medio_giro is not None else 0
+            lucro_percentual_giro = lucro_percentual_giro if lucro_percentual_giro is not None else 0
+            lucro_usdt_giro = lucro_usdt_giro if lucro_usdt_giro is not None else 0
+
+            message += (
+                f"\n📈 **Posição Especulação:** {quantidade_giro:.2f} {base_currency} @ ${preco_medio_giro:.4f} (PM)\n"
+                f"💹 **L/P Especulação:** {lucro_percentual_giro:.2f}% (${lucro_usdt_giro:.2f})\n"
+            )
+        else:
+            message += "\n📈 **Posição Especulação:** Nenhuma Posição Aberta\n"
+
+        message += (
+            f"\n🟢 **Última Compra:** {compra_str}\n"
             f"🔴 **Última Venda:** {venda_str}\n"
             f"-----------------------------------"
         )
@@ -169,18 +206,25 @@ class TelegramBot:
 
         if bot_name.upper() == 'TOTAL':
             total_usdt = 0
-            total_posicao_usdt = 0
+            total_posicao_acumulacao = 0
+            total_posicao_giro = 0
+
             for worker in self.workers:
                 status = worker.get_status_dict()
                 total_usdt += status.get('saldo_disponivel_usdt', 0)
-                total_posicao_usdt += status.get('status_posicao', {}).get('valor_total', 0)
-            
+                total_posicao_acumulacao += status.get('status_posicao_acumulacao', {}).get('valor_total', 0)
+                total_posicao_giro += status.get('status_posicao_giro_rapido', {}).get('valor_total', 0)
+
+            total_posicoes = total_posicao_acumulacao + total_posicao_giro
+            total_geral = total_usdt + total_posicoes
+
             response = (
                 f"💰 **Saldo Total Consolidado**\n\n"
-                f"- **Valor em Posições:** ${total_posicao_usdt:.2f}\n"
-                f"- **Saldo USDT Disponível:** ${total_usdt:.2f}\n"
+                f"📊 **Acumulação:** ${total_posicao_acumulacao:.2f}\n"
+                f"🎯 **Giro Rápido:** ${total_posicao_giro:.2f}\n"
+                f"💵 **USDT Disponível:** ${total_usdt:.2f}\n"
                 f"-----------------------------------\n"
-                f"**Total Geral:** **${total_posicao_usdt + total_usdt:.2f}**"
+                f"**Total Geral:** **${total_geral:.2f}**"
             )
             await self._reply_text(update, response, parse_mode='Markdown')
             return
@@ -190,20 +234,40 @@ class TelegramBot:
             if worker.config.get('nome_instancia') == bot_name:
                 bot_encontrado = worker
                 break
-        
+
         if bot_encontrado:
             status = bot_encontrado.get_status_dict()
-            posicao = status.get('status_posicao', {})
+            base_currency = status.get('ativo_base', 'N/A')
+
+            # Carteira Acumulação
+            posicao_acum = status.get('status_posicao_acumulacao', {})
+            qtd_acum = posicao_acum.get('quantidade', 0)
+            valor_acum = posicao_acum.get('valor_total', 0)
+
+            # Carteira Giro Rápido
+            posicao_giro = status.get('status_posicao_giro_rapido', {})
+            qtd_giro = posicao_giro.get('quantidade', 0)
+            valor_giro = posicao_giro.get('valor_total', 0)
+
+            saldo_usdt = status.get('saldo_disponivel_usdt', 0)
+            total = valor_acum + valor_giro + saldo_usdt
+
             response = (
                 f"💰 **Saldo do Bot: {status.get('nome_instancia')} ({status.get('par')})**\n\n"
-                f"- **Posição:** {posicao.get('quantidade', 0):.2f} {status.get('ativo_base', 'N/A')}\n"
-                f"- **Valor da Posição:** ${posicao.get('valor_total', 0):.2f}\n"
-                f"- **Saldo USDT Disponível:** ${status.get('saldo_disponivel_usdt', 0):.2f}"
+                f"📊 **Acumulação:**\n"
+                f"  • Quantidade: {qtd_acum:.2f} {base_currency}\n"
+                f"  • Valor: ${valor_acum:.2f}\n\n"
+                f"🎯 **Giro Rápido:**\n"
+                f"  • Quantidade: {qtd_giro:.2f} {base_currency}\n"
+                f"  • Valor: ${valor_giro:.2f}\n\n"
+                f"💵 **USDT Disponível:** ${saldo_usdt:.2f}\n"
+                f"-----------------------------------\n"
+                f"**Total:** **${total:.2f}**"
             )
             await self._reply_text(update, response, parse_mode='Markdown')
         else:
             bots_disponiveis = [w.config.get('nome_instancia', 'N/A') for w in self.workers]
-            await self._reply_text(update, 
+            await self._reply_text(update,
                 f"❌ Bot '{bot_name}' não encontrado.\n\n"
                 f"Bots disponíveis:\n" + "\n".join([f"• {b}" for b in bots_disponiveis])
             )
@@ -499,37 +563,61 @@ class TelegramBot:
     @restricted_access
     async def alocacao(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_usdt = Decimal('0')
-        total_posicao_usdt = Decimal('0')
-        alocacao_individual = {}
+        total_acumulacao = Decimal('0')
+        total_giro_rapido = Decimal('0')
+        alocacao_por_ativo_acumulacao = {}
+        alocacao_por_ativo_giro = {}
 
         for worker in self.workers:
             status = worker.get_status_dict()
             par = status.get('par', 'N/A').split('/')[0]
-            valor_posicao = status.get('status_posicao', {}).get('valor_total', 0)
             saldo_usdt = status.get('saldo_disponivel_usdt', 0)
 
-            total_usdt += saldo_usdt
-            total_posicao_usdt += valor_posicao
-            if par not in alocacao_individual:
-                alocacao_individual[par] = Decimal('0')
-            alocacao_individual[par] += valor_posicao
+            # Acumulação
+            valor_acumulacao = status.get('status_posicao_acumulacao', {}).get('valor_total', 0)
+            total_acumulacao += valor_acumulacao
+            if valor_acumulacao > 0:
+                if par not in alocacao_por_ativo_acumulacao:
+                    alocacao_por_ativo_acumulacao[par] = Decimal('0')
+                alocacao_por_ativo_acumulacao[par] += valor_acumulacao
 
-        capital_total = total_usdt + total_posicao_usdt
+            # Giro Rápido
+            valor_giro = status.get('status_posicao_giro_rapido', {}).get('valor_total', 0)
+            total_giro_rapido += valor_giro
+            if valor_giro > 0:
+                if par not in alocacao_por_ativo_giro:
+                    alocacao_por_ativo_giro[par] = Decimal('0')
+                alocacao_por_ativo_giro[par] += valor_giro
+
+            total_usdt += saldo_usdt
+
+        capital_total = total_usdt + total_acumulacao + total_giro_rapido
         if capital_total == 0:
             await self._reply_text(update, "Não há capital para analisar.")
             return
 
         percentual_usdt = (total_usdt / capital_total) * 100
-        percentual_cripto = (total_posicao_usdt / capital_total) * 100
+        percentual_acumulacao = (total_acumulacao / capital_total) * 100
+        percentual_giro = (total_giro_rapido / capital_total) * 100
 
-        response = f"**Alocação de Capital Total: ${capital_total:.2f}**\n\n"
-        response += f"- 💵 USDT: ${total_usdt:.2f} ({percentual_usdt:.2f}%)\n"
-        response += f"- 💎 Cripto: ${total_posicao_usdt:.2f} ({percentual_cripto:.2f}%)\n\n"
-        response += "**Alocação por Ativo:**\n"
+        response = f"📊 **Alocação de Capital Total: ${capital_total:.2f}**\n\n"
+        response += f"💵 **USDT:** ${total_usdt:.2f} ({percentual_usdt:.2f}%)\n"
+        response += f"📊 **Acumulação:** ${total_acumulacao:.2f} ({percentual_acumulacao:.2f}%)\n"
+        response += f"🎯 **Giro Rápido:** ${total_giro_rapido:.2f} ({percentual_giro:.2f}%)\n\n"
 
-        for ativo, valor in alocacao_individual.items():
-            percentual_ativo = (valor / capital_total) * 100
-            response += f"- {ativo}: ${valor:.2f} ({percentual_ativo:.2f}%)\n"
+        # Breakdown por carteira e ativo
+        if alocacao_por_ativo_acumulacao:
+            response += "**📊 Acumulação por Ativo:**\n"
+            for ativo, valor in alocacao_por_ativo_acumulacao.items():
+                percentual_ativo = (valor / capital_total) * 100
+                response += f"  • {ativo}: ${valor:.2f} ({percentual_ativo:.2f}%)\n"
+            response += "\n"
+
+        if alocacao_por_ativo_giro:
+            response += "**🎯 Giro Rápido por Ativo:**\n"
+            for ativo, valor in alocacao_por_ativo_giro.items():
+                percentual_ativo = (valor / capital_total) * 100
+                response += f"  • {ativo}: ${valor:.2f} ({percentual_ativo:.2f}%)\n"
 
         await self._reply_text(update, response, parse_mode='Markdown')
     
@@ -687,10 +775,14 @@ class TelegramBot:
         )
 
         # IMPORTANTE: unknown_command deve ser o ÚLTIMO handler de comando
-        # Excluir comandos que são tratados pelo ConversationHandler para evitar conflitos
+        # Excluir todos os comandos registrados para evitar conflitos
+        comandos_registrados = (
+            r'^/(start|status|saldo|pausar|liberar|crash|crash_off|parar|ajuda|'
+            r'details|forcebuy|forcesell|lucro|historico|alocacao|ajustar_risco|cancelar)'
+        )
         self.application.add_handler(
             MessageHandler(
-                filters.COMMAND & ~filters.Regex(r'^/(ajustar_risco|cancelar)'),
+                filters.COMMAND & ~filters.Regex(comandos_registrados),
                 self.unknown_command
             ),
             group=1

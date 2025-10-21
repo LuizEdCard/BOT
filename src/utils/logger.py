@@ -34,6 +34,10 @@ class ColoredFormatter(logging.Formatter):
     }
 
     def format(self, record):
+        # Adicionar contexto se não existir (evita erro de formatação)
+        if not hasattr(record, 'context'):
+            record.context = ''
+
         # Adicionar cor ao nível
         levelname = record.levelname
         if levelname in self.COLORS:
@@ -110,7 +114,7 @@ class Logger:
         # Obter configuração do console
         console_config = self.config.get('console', {})
         nivel = self._parse_nivel(console_config.get('nivel', 'INFO'))
-        formato = console_config.get('formato', '%(asctime)s | %(levelname)s | %(message)s')
+        formato = console_config.get('formato', '%(asctime)s | %(levelname)s | [%(context)s] | %(message)s')
         formato_data = console_config.get('formato_data', '%H:%M:%S')
 
         console_handler.setLevel(nivel)
@@ -137,13 +141,19 @@ class Logger:
         # Obter configuração do arquivo
         arquivo_config = self.config.get('arquivo', {})
         nivel = self._parse_nivel(arquivo_config.get('nivel', 'INFO'))
-        formato = arquivo_config.get('formato', '%(levelname)-8s | %(asctime)s | %(name)s | %(message)s')
+        formato = arquivo_config.get('formato', '%(levelname)-8s | %(asctime)s | [%(context)s] | %(name)s | %(message)s')
         formato_data = arquivo_config.get('formato_data', '%Y-%m-%d %H:%M:%S')
 
         file_handler.setLevel(nivel)
 
-        # Formato para arquivo (sem cores)
-        formatter = logging.Formatter(formato, datefmt=formato_data)
+        # Formatter customizado para arquivo (adiciona context se não existir)
+        class ContextFormatter(logging.Formatter):
+            def format(self, record):
+                if not hasattr(record, 'context'):
+                    record.context = ''
+                return super().format(record)
+
+        formatter = ContextFormatter(formato, datefmt=formato_data)
         file_handler.setFormatter(formatter)
 
         self.logger.addHandler(file_handler)

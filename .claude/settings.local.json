@@ -15,7 +15,11 @@
       "Bash(echo \"✅ $file atualizado\")",
       "Bash(fi)",
       "Bash(done)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(source:*)",
+      "Bash(sqlite3:*)",
+      "Bash(timeout 90 python manager.py)",
+      "Bash(tee:*)"
     ],
     "deny": [],
     "ask": []

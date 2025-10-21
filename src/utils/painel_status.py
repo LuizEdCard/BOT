@@ -130,37 +130,39 @@ class PainelStatus:
 
     def exibir(self, dados: Dict[str, Any]):
         """
-        Exibe o painel de status formatado
+        Exibe o painel de status formatado com suporte a dual-wallet
 
         Args:
             dados: Dicionário com todos os dados necessários:
                 - preco_atual: Decimal
                 - sma_28: Decimal
-                - quantidade_ada: Decimal (quantidade do ativo base)
-                - preco_medio: Decimal
                 - saldo_usdt: Decimal
                 - reserva: Decimal
                 - capital_total: Decimal
                 - stats_24h: Dict com 'compras', 'vendas', 'lucro_realizado'
                 - base_currency: str (ex: 'ADA', 'XRP', 'BTC')
+                - posicao_acumulacao: Dict com 'quantidade', 'preco_medio', 'lucro_percentual' (opcional)
+                - posicao_giro_rapido: Dict com 'quantidade', 'preco_medio', 'lucro_percentual' (opcional)
+
+                # Compatibilidade com formato antigo:
+                - quantidade_ada: Decimal (usado se posicoes específicas não fornecidas)
+                - preco_medio: Decimal (usado se posicoes específicas não fornecidas)
         """
         # Atualizar timestamp
         self.ultima_exibicao = time.time()
         agora = datetime.now().strftime('%H:%M:%S')
         uptime = self.calcular_uptime()
 
-        # Extrair dados
+        # Extrair dados comuns
         preco_atual = float(dados['preco_atual'])
         sma_28 = float(dados['sma_28'])
-        quantidade_ada = float(dados['quantidade_ada'])
-        preco_medio = float(dados.get('preco_medio', 0))
         saldo_usdt = float(dados['saldo_usdt'])
         reserva = float(dados['reserva'])
         capital_total = float(dados['capital_total'])
         stats_24h = dados.get('stats_24h', {})
-        base_currency = dados.get('base_currency', 'ADA')  # Default para retrocompatibilidade
+        base_currency = dados.get('base_currency', 'ADA')
 
-        # Calcular métricas
+        # Calcular métricas de mercado
         if sma_28 > 0:
             dist_sma = ((sma_28 - preco_atual) / sma_28) * 100
             sinal_sma = "+" if dist_sma > 0 else ""
@@ -168,14 +170,19 @@ class PainelStatus:
             dist_sma = 0
             sinal_sma = ""
 
-        valor_posicao = quantidade_ada * preco_atual
+        # Extrair posições (suporte dual-wallet e legado)
+        posicao_acumulacao = dados.get('posicao_acumulacao')
+        posicao_giro_rapido = dados.get('posicao_giro_rapido')
 
-        if preco_medio > 0 and quantidade_ada > 0:
-            lucro_pct = ((preco_atual - preco_medio) / preco_medio) * 100
-            sinal_lucro = "+" if lucro_pct > 0 else ""
-        else:
-            lucro_pct = 0
-            sinal_lucro = ""
+        # Fallback para formato legado (sem dual-wallet)
+        if not posicao_acumulacao and 'quantidade_ada' in dados:
+            posicao_acumulacao = {
+                'quantidade': float(dados['quantidade_ada']),
+                'preco_medio': float(dados.get('preco_medio', 0)),
+                'lucro_percentual': 0
+            }
+            if posicao_acumulacao['preco_medio'] > 0 and posicao_acumulacao['quantidade'] > 0:
+                posicao_acumulacao['lucro_percentual'] = ((preco_atual - posicao_acumulacao['preco_medio']) / posicao_acumulacao['preco_medio']) * 100
 
         compras_24h = stats_24h.get('compras', 0)
         vendas_24h = stats_24h.get('vendas', 0)
@@ -183,39 +190,57 @@ class PainelStatus:
         sinal_lucro_24h = "+" if lucro_24h > 0 else ""
 
         # Montar painel
-        largura = 54
+        largura = 60
         self.logger.info("")
         self.logger.info("┌" + "─" * largura + "┐")
         self.logger.info(f"│ {Icones.STATUS} BOT STATUS | {agora} | Uptime: {uptime:>13} │")
         self.logger.info("├" + "─" * largura + "┤")
-        self.logger.info(
-            f"│ {Icones.MERCADO} MERCADO  │ ${preco_atual:.6f} | "
-            f"SMA28: ${sma_28:.6f} ({sinal_sma}{dist_sma:.1f}%)"
-            + " " * (largura - len(f"│ {Icones.MERCADO} MERCADO  │ ${preco_atual:.6f} | SMA28: ${sma_28:.6f} ({sinal_sma}{dist_sma:.1f}%)")) + "│"
-        )
 
-        if quantidade_ada > 0:
-            self.logger.info(
-                f"│ {Icones.POSICAO} POSIÇÃO  │ {quantidade_ada:.1f} {base_currency} @ ${preco_medio:.6f} | "
-                f"{sinal_lucro}{lucro_pct:.2f}%"
-                + " " * (largura - len(f"│ {Icones.POSICAO} POSIÇÃO  │ {quantidade_ada:.1f} {base_currency} @ ${preco_medio:.6f} | {sinal_lucro}{lucro_pct:.2f}%")) + "│"
-            )
+        # Mercado
+        mercado_linha = f"│ {Icones.MERCADO} MERCADO  │ ${preco_atual:.6f} | SMA28: ${sma_28:.6f} ({sinal_sma}{dist_sma:.1f}%)"
+        espacos = largura - len(mercado_linha) + 1
+        self.logger.info(mercado_linha + " " * espacos + "│")
+
+        # POSIÇÃO ACUMULAÇÃO
+        if posicao_acumulacao and posicao_acumulacao.get('quantidade', 0) > 0:
+            qtd = posicao_acumulacao['quantidade']
+            pm = posicao_acumulacao['preco_medio']
+            lucro_pct = posicao_acumulacao.get('lucro_percentual', 0)
+            sinal_lucro = "+" if lucro_pct > 0 else ""
+
+            linha_acum = f"│ 📊 ACUMULAÇÃO │ {qtd:.1f} {base_currency} @ ${pm:.6f} | {sinal_lucro}{lucro_pct:.2f}%"
+            espacos = largura - len(linha_acum) + 1
+            self.logger.info(linha_acum + " " * espacos + "│")
         else:
-            self.logger.info(
-                f"│ {Icones.POSICAO} POSIÇÃO  │ Sem posição aberta"
-                + " " * (largura - len(f"│ {Icones.POSICAO} POSIÇÃO  │ Sem posição aberta")) + "│"
-            )
+            linha_acum = f"│ 📊 ACUMULAÇÃO │ Sem posição aberta"
+            espacos = largura - len(linha_acum) + 1
+            self.logger.info(linha_acum + " " * espacos + "│")
 
-        self.logger.info(
-            f"│ {Icones.CAPITAL} CAPITAL  │ ${saldo_usdt:.2f} | "
-            f"Reserva: ${reserva:.2f} (8%)"
-            + " " * (largura - len(f"│ {Icones.CAPITAL} CAPITAL  │ ${saldo_usdt:.2f} | Reserva: ${reserva:.2f} (8%)")) + "│"
-        )
-        self.logger.info(
-            f"│ {Icones.HISTORICO} 24H      │ {compras_24h} compras | "
-            f"{vendas_24h} vendas | {sinal_lucro_24h}${lucro_24h:.2f}"
-            + " " * (largura - len(f"│ {Icones.HISTORICO} 24H      │ {compras_24h} compras | {vendas_24h} vendas | {sinal_lucro_24h}${lucro_24h:.2f}")) + "│"
-        )
+        # POSIÇÃO GIRO RÁPIDO
+        if posicao_giro_rapido and posicao_giro_rapido.get('quantidade', 0) > 0:
+            qtd_giro = posicao_giro_rapido['quantidade']
+            pm_giro = posicao_giro_rapido['preco_medio']
+            lucro_pct_giro = posicao_giro_rapido.get('lucro_percentual', 0)
+            sinal_lucro_giro = "+" if lucro_pct_giro > 0 else ""
+
+            linha_giro = f"│ 🎯 GIRO RÁPIDO│ {qtd_giro:.1f} {base_currency} @ ${pm_giro:.6f} | {sinal_lucro_giro}{lucro_pct_giro:.2f}%"
+            espacos = largura - len(linha_giro) + 1
+            self.logger.info(linha_giro + " " * espacos + "│")
+        else:
+            linha_giro = f"│ 🎯 GIRO RÁPIDO│ Sem posição aberta"
+            espacos = largura - len(linha_giro) + 1
+            self.logger.info(linha_giro + " " * espacos + "│")
+
+        # Capital
+        capital_linha = f"│ {Icones.CAPITAL} CAPITAL  │ ${saldo_usdt:.2f} | Reserva: ${reserva:.2f} (8%)"
+        espacos = largura - len(capital_linha) + 1
+        self.logger.info(capital_linha + " " * espacos + "│")
+
+        # 24H
+        stats_linha = f"│ {Icones.HISTORICO} 24H      │ {compras_24h} compras | {vendas_24h} vendas | {sinal_lucro_24h}${lucro_24h:.2f}"
+        espacos = largura - len(stats_linha) + 1
+        self.logger.info(stats_linha + " " * espacos + "│")
+
         self.logger.info("└" + "─" * largura + "┘")
         self.logger.info("")
 

@@ -9,6 +9,8 @@
 
   "percentual_minimo_melhora_pm": 2.0,
 
+  "rsi_limite_compra": 30,
+
   "degraus_compra": [
     {
       "nivel": 1,
@@ -182,16 +184,29 @@
     "exposicao_maxima_percentual_capital": 70.0,
     "reativar_compras_apos_venda": true,
     "compras_de_oportunidade_extrema": [
-      { 
-        "tipo": "absoluto", 
-        "preco_alvo": 0.60, 
-        "percentual_capital_usar": 25 
+      {
+        "tipo": "absoluto",
+        "preco_alvo": 0.60,
+        "percentual_capital_usar": 25
       },
-      { 
+      {
         "tipo": "percentual_pm",
         "queda_pm_pct": 10.0,
-        "percentual_capital_usar": 25 
+        "percentual_capital_usar": 25
       }
     ]
+  },
+
+  "estrategia_giro_rapido": {
+    "habilitado": true,
+    "alocacao_capital_pct": 20,
+    "lookback_horas_compra": 24,
+    "gatilho_compra_pct": 2.0,
+    "meta_lucro_pct": 3.5,
+    "protecao_lucro": {
+      "ativacao_pct": 2.0,
+      "venda_reversao_pct": 0.5
+    },
+    "descricao": "Estratégia de giro rápido (swing trade) operando em paralelo com DCA"
   }
 }

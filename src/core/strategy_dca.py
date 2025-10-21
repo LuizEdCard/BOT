@@ -10,9 +10,6 @@ from datetime import datetime, timedelta
 from src.core.position_manager import PositionManager
 from src.core.gestao_capital import GestaoCapital
 from src.persistencia.state_manager import StateManager
-from src.utils.logger import get_loggers
-
-logger, _ = get_loggers()
 
 
 class StrategyDCA:
@@ -20,30 +17,42 @@ class StrategyDCA:
     Estratégia DCA (Dollar Cost Averaging) para compras em degraus
     baseada em queda percentual desde a SMA e melhora do preço médio.
     """
-    
+
     def __init__(
-        self, 
-        config: Dict[str, Any], 
+        self,
+        config: Dict[str, Any],
         position_manager: PositionManager,
         gestao_capital: GestaoCapital,
         state_manager: StateManager,
-        worker=None
+        worker=None,
+        logger=None,
+        notifier=None
     ):
         """
         Inicializa a estratégia DCA
-        
+
         Args:
             config: Configurações da estratégia
             position_manager: Gerenciador de posições
             gestao_capital: Gerenciador de capital
             state_manager: Gerenciador de estado
             worker: Referência ao BotWorker (para acessar modo crash)
+            logger: Logger contextual para esta estratégia
+            notifier: Instância do Notifier para notificações
         """
         self.config = config
         self.position_manager = position_manager
         self.gestao_capital = gestao_capital
         self.state = state_manager
         self.worker = worker
+        self.notifier = notifier
+
+        # Logger contextual (fallback para logger global se não fornecido)
+        if logger:
+            self.logger = logger
+        else:
+            from src.utils.logger import get_loggers
+            self.logger, _ = get_loggers()
         
         # Cache para evitar spam de logs
         self.ultima_tentativa_log_degrau: Dict[int, datetime] = {}
@@ -56,7 +65,7 @@ class StrategyDCA:
         self.percentual_minimo_melhora_pm = config.get('PERCENTUAL_MINIMO_MELHORA_PM', 2.0)
         self.gestao_risco = config.get('GESTAO_DE_RISCO', {})
         
-        logger.debug(f"🎯 Estratégia DCA inicializada com {len(self.degraus_compra)} degraus")
+        self.logger.debug(f"🎯 Estratégia DCA inicializada com {len(self.degraus_compra)} degraus")
     
     def verificar_oportunidade(
         self, 
@@ -80,7 +89,7 @@ class StrategyDCA:
             modo_crash = self.worker.modo_crash_ativo if self.worker else False
             
             if modo_crash:
-                logger.warning("💥 MODO CRASH: Ignorando restrições de exposição e preço médio")
+                self.logger.warning("💥 MODO CRASH: Ignorando restrições de exposição e preço médio")
             
             # Verificar guardião de exposição máxima (exceto em modo crash)
             if not modo_crash and not self._verificar_guardiao_exposicao():
@@ -89,8 +98,21 @@ class StrategyDCA:
             # Buscar degrau ativo baseado na distância da SMA
             degrau_ativo = self._encontrar_degrau_ativo(distancia_sma)
             if not degrau_ativo:
-                logger.debug(f"📊 Nenhum degrau ativo para queda de {distancia_sma:.2f}%")
+                self.logger.debug(f"📊 Nenhum degrau ativo para queda de {distancia_sma:.2f}%")
                 return None
+
+            # Adicionar verificação de RSI
+            rsi_limite_compra = Decimal(str(self.config.get('RSI_LIMITE_COMPRA', 30)))
+            rsi_atual = self.worker.analise_tecnica.get_rsi(self.config['par'])
+            if rsi_atual is None:
+                self.logger.debug(f"📊 Compra bloqueada pelo RSI: RSI não disponível")
+                return None
+            elif rsi_atual >= rsi_limite_compra:
+                motivo = f"RSI {rsi_atual:.2f} >= {rsi_limite_compra}"
+                self.logger.debug(f"📊 Compra bloqueada pelo RSI: {motivo}")
+                self._notificar_compra_bloqueada(degrau_ativo, preco_atual, "RSI", motivo)
+                return None
+
             
             # Verificar dupla-condição: SMA + melhora do preço médio (exceto em modo crash)
             if not modo_crash and not self._verificar_dupla_condicao(degrau_ativo, preco_atual, distancia_sma):
@@ -108,7 +130,7 @@ class StrategyDCA:
             
             pode_comprar_capital, motivo = self.gestao_capital.pode_comprar(valor_ordem)
             if not pode_comprar_capital:
-                logger.debug(f"💰 Capital insuficiente para degrau {degrau_ativo['nivel']}: {motivo}")
+                self.logger.debug(f"💰 Capital insuficiente para degrau {degrau_ativo['nivel']}: {motivo}")
                 return None
             
             # Oportunidade encontrada!
@@ -132,7 +154,7 @@ class StrategyDCA:
             return oportunidade
             
         except Exception as e:
-            logger.error(f"❌ Erro ao verificar oportunidade DCA: {e}")
+            self.logger.error(f"❌ Erro ao verificar oportunidade DCA: {e}")
             return None
     
     def _verificar_guardiao_exposicao(self) -> bool:
@@ -153,31 +175,31 @@ class StrategyDCA:
             
             if alocacao_atual > limite_exposicao:
                 if not self.notificou_exposicao_maxima:
-                    logger.warning("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                    logger.warning(f"🛡️ GUARDIÃO ATIVADO: Exposição máxima de {limite_exposicao}% atingida.")
-                    logger.warning(f"   Alocação atual em ADA: {alocacao_atual:.1f}%")
-                    logger.warning("   Compras normais suspensas. Verificando camadas de oportunidade extrema...")
-                    logger.warning("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                    self.logger.warning("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                    self.logger.warning(f"🛡️ GUARDIÃO ATIVADO: Exposição máxima de {limite_exposicao}% atingida.")
+                    self.logger.warning(f"   Alocação atual em ADA: {alocacao_atual:.1f}%")
+                    self.logger.warning("   Compras normais suspensas. Verificando camadas de oportunidade extrema...")
+                    self.logger.warning("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
                     self.notificou_exposicao_maxima = True
                 
                 return False
             else:
                 # Exposição normalizada - reativar compras
                 if self.notificou_exposicao_maxima:
-                    logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                    logger.info(f"✅ Exposição de capital normalizada ({alocacao_atual:.1f}%). Compras normais reativadas.")
-                    logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                    self.logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                    self.logger.info(f"✅ Exposição de capital normalizada ({alocacao_atual:.1f}%). Compras normais reativadas.")
+                    self.logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
                     self.notificou_exposicao_maxima = False
                     
                     # Resetar oportunidades extremas quando exposição normaliza
                     if self.state.get_state('oportunidades_extremas_usadas'):
                         self.state.set_state('oportunidades_extremas_usadas', [])
-                        logger.info("🔓 Camadas de oportunidade extrema rearmadas.")
+                        self.logger.info("🔓 Camadas de oportunidade extrema rearmadas.")
                 
                 return True
                 
         except Exception as e:
-            logger.error(f"❌ Erro ao verificar guardião de exposição: {e}")
+            self.logger.error(f"❌ Erro ao verificar guardião de exposição: {e}")
             return True  # Em caso de erro, permitir compras normais
     
     def _verificar_oportunidades_extremas(self, preco_atual: Decimal) -> Optional[Dict[str, Any]]:
@@ -222,11 +244,11 @@ class StrategyDCA:
                             gatilho_atingido = True
                             motivo = f"Oportunidade Extrema Percentual ({queda_pm_pct}% abaixo do PM {preco_medio_atual:.4f})"
                     else:
-                        logger.debug("PM indisponível para camada de oportunidade percentual.")
+                        self.logger.debug("PM indisponível para camada de oportunidade percentual.")
                         continue
 
                 if gatilho_atingido:
-                    logger.info(f"🚨 {motivo.upper()} DETECTADA!")
+                    self.logger.info(f"🚨 {motivo.upper()} DETECTADA!")
                     
                     percentual_a_usar = Decimal(str(camada['percentual_capital_usar']))
                     capital_disponivel = self.gestao_capital.calcular_capital_disponivel()
@@ -246,12 +268,12 @@ class StrategyDCA:
                             'marcar_como_usada': camada_id
                         }
                     else:
-                        logger.warning(f"⚠️ Oportunidade extrema ignorada - valor abaixo do mínimo: ${valor_compra_usdt:.2f}")
+                        self.logger.warning(f"⚠️ Oportunidade extrema ignorada - valor abaixo do mínimo: ${valor_compra_usdt:.2f}")
             
             return None
             
         except Exception as e:
-            logger.error(f"❌ Erro ao verificar oportunidades extremas: {e}", exc_info=True)
+            self.logger.error(f"❌ Erro ao verificar oportunidades extremas: {e}", exc_info=True)
             return None
     
     def _encontrar_degrau_ativo(self, distancia_sma: Decimal) -> Optional[Dict[str, Any]]:
@@ -299,7 +321,7 @@ class StrategyDCA:
         
         if preco_medio_atual is None or preco_medio_atual <= 0:
             # Sem posição anterior - sempre pode comprar
-            logger.debug(f"✅ Sem posição anterior - condição de melhora PM dispensada")
+            self.logger.debug(f"✅ Sem posição anterior - condição de melhora PM dispensada")
             return True
         
         # Verificar melhora mínima do preço médio
@@ -308,14 +330,16 @@ class StrategyDCA:
         condicao_melhora_pm_ok = preco_atual <= limite_preco_melhora
         
         if not condicao_melhora_pm_ok:
-            logger.debug(
+            motivo = f"Preço ${preco_atual:.6f} não melhora PM ${preco_medio_atual:.6f} em {self.percentual_minimo_melhora_pm}%"
+            self.logger.debug(
                 f"📊 Degrau {degrau['nivel']}: SMA OK ({distancia_sma:.2f}%), "
                 f"mas preço ${preco_atual:.6f} não melhora PM (${preco_medio_atual:.6f}) "
                 f"em {self.percentual_minimo_melhora_pm}%"
             )
+            self._notificar_compra_bloqueada(degrau, preco_atual, "Preço Médio (PM)", motivo)
             return False
         
-        logger.debug(f"✅ Dupla-condição atendida para degrau {degrau['nivel']}")
+        self.logger.debug(f"✅ Dupla-condição atendida para degrau {degrau['nivel']}")
         return True
     
     def _verificar_cooldowns(self, degrau: Dict[str, Any]) -> tuple[bool, Optional[str]]:
@@ -341,7 +365,7 @@ class StrategyDCA:
             if minutos_decorridos < self.cooldown_global_minutos:
                 minutos_restantes = int(self.cooldown_global_minutos - minutos_decorridos)
                 motivo = f"cooldown_global:{minutos_restantes}min"
-                logger.debug(f"🕒 Cooldown global ativo (faltam {minutos_restantes} min)")
+                self.logger.debug(f"🕒 Cooldown global ativo (faltam {minutos_restantes} min)")
                 return (False, motivo)
         
         # VERIFICAÇÃO 2: COOLDOWN POR DEGRAU (intervalo específico do degrau)
@@ -357,7 +381,7 @@ class StrategyDCA:
             if horas_decorridas < intervalo_horas:
                 horas_restantes = float(intervalo_horas - horas_decorridas)
                 motivo = f"cooldown_degrau:{horas_restantes:.1f}h"
-                logger.debug(f"🕒 Degrau {nivel_degrau} em cooldown (faltam {horas_restantes:.1f}h)")
+                self.logger.debug(f"🕒 Degrau {nivel_degrau} em cooldown (faltam {horas_restantes:.1f}h)")
                 return (False, motivo)
         
         # Passou em todas as verificações
@@ -374,9 +398,9 @@ class StrategyDCA:
         if nivel_degrau not in self.degraus_notificados_bloqueados:
             self.degraus_notificados_bloqueados.add(nivel_degrau)
             if motivo and motivo.startswith('cooldown_global'):
-                logger.debug(f"🕒 Cooldown global ativo ({motivo})")
+                self.logger.debug(f"🕒 Cooldown global ativo ({motivo})")
             elif motivo and motivo.startswith('cooldown_degrau'):
-                logger.debug(f"🕒 Degrau {nivel_degrau} em cooldown ({motivo})")
+                self.logger.debug(f"🕒 Degrau {nivel_degrau} em cooldown ({motivo})")
     
     def _gerenciar_notificacao_desbloqueio(self, nivel_degrau: int):
         """
@@ -387,7 +411,7 @@ class StrategyDCA:
         """
         if nivel_degrau in self.degraus_notificados_bloqueados:
             self.degraus_notificados_bloqueados.remove(nivel_degrau)
-            logger.info(f"🔓 Degrau {nivel_degrau} desbloqueado")
+            self.logger.info(f"🔓 Degrau {nivel_degrau} desbloqueado")
     
     def _log_oportunidade_encontrada(self, oportunidade: Dict[str, Any]):
         """
@@ -398,7 +422,7 @@ class StrategyDCA:
         """
         nivel_degrau = oportunidade['degrau']
         if isinstance(nivel_degrau, str):  # Oportunidade extrema
-            logger.info(f"🎯 {oportunidade['motivo']} encontrada!")
+            self.logger.info(f"🎯 {oportunidade['motivo']} encontrada!")
             return
         
         # Anti-spam: só loga "Degrau X ativado" 1x a cada 5 minutos
@@ -406,8 +430,35 @@ class StrategyDCA:
         ultima_log = self.ultima_tentativa_log_degrau.get(nivel_degrau)
         
         if ultima_log is None or (agora - ultima_log) >= timedelta(minutes=5):
-            logger.info(f"🎯 Degrau {nivel_degrau} ativado! Queda: {oportunidade['distancia_sma']:.2f}%")
+            self.logger.info(f"🎯 Degrau {nivel_degrau} ativado! Queda: {oportunidade['distancia_sma']:.2f}%")
             self.ultima_tentativa_log_degrau[nivel_degrau] = agora
+
+    def _notificar_compra_bloqueada(self, degrau: Dict[str, Any], preco_atual: Decimal, tipo_bloqueio: str, motivo: str):
+        """
+        Envia uma notificação para o Telegram sobre uma compra bloqueada.
+        Para evitar spam, envia apenas uma vez por degrau/motivo.
+        """
+        if not self.notifier:
+            return
+
+        # Criar uma chave única para o bloqueio
+        chave_bloqueio = f"bloqueio_{degrau['nivel']}_{tipo_bloqueio}"
+        
+        # Usar o state manager para verificar se já notificou
+        if not self.state.get_state(chave_bloqueio):
+            titulo = f"Compra Bloqueada (Degrau {degrau['nivel']})"
+            mensagem = (
+                f"Oportunidade de compra no degrau {degrau['nivel']} foi encontrada, mas não executada.\n\n"
+                f"📉 **Gatilho:** Queda de {degrau['queda_percentual']}% ativado\n"
+                f"💲 **Preço Atual:** ${preco_atual:.6f}\n"
+                f"🔒 **Bloqueio:** {tipo_bloqueio}\n"
+                f"📄 **Motivo:** {motivo}"
+            )
+            
+            self.notifier.enviar_alerta(titulo, mensagem)
+            
+            # Marcar que já notificou para esta chave (com expiração de 1h)
+            self.state.set_state(chave_bloqueio, True, ttl_seconds=3600)
     
     def registrar_compra_executada(
         self, 
@@ -427,7 +478,7 @@ class StrategyDCA:
             
             # Registrar cooldown global
             self.state.set_state('ultima_compra_global_ts', timestamp_iso)
-            logger.debug(f"🕒 Cooldown global ativado: {self.cooldown_global_minutos} minutos")
+            self.logger.debug(f"🕒 Cooldown global ativado: {self.cooldown_global_minutos} minutos")
             
             # Se foi oportunidade extrema, marcar como usada
             if oportunidade['tipo'] == 'oportunidade_extrema':
@@ -436,17 +487,17 @@ class StrategyDCA:
                 if marca and marca not in oportunidades_usadas:
                     oportunidades_usadas.append(marca)
                     self.state.set_state('oportunidades_extremas_usadas', oportunidades_usadas)
-                    logger.debug(f"🔒 Oportunidade extrema {marca} marcada como usada")
+                    self.logger.debug(f"🔒 Oportunidade extrema {marca} marcada como usada")
             
             # Se foi compra DCA normal, registrar cooldown por degrau
             elif oportunidade['tipo'] == 'dca' and isinstance(oportunidade['degrau'], int):
                 nivel_degrau = oportunidade['degrau']
                 chave_degrau = f'ultima_compra_degrau_{nivel_degrau}_ts'
                 self.state.set_state(chave_degrau, timestamp_iso)
-                logger.debug(f"🕒 Cooldown degrau {nivel_degrau} ativado")
+                self.logger.debug(f"🕒 Cooldown degrau {nivel_degrau} ativado")
             
         except Exception as e:
-            logger.error(f"❌ Erro ao registrar compra executada: {e}")
+            self.logger.error(f"❌ Erro ao registrar compra executada: {e}")
     
     def obter_estatisticas(self) -> Dict[str, Any]:
         """
@@ -481,5 +532,5 @@ class StrategyDCA:
             return stats
             
         except Exception as e:
-            logger.error(f"❌ Erro ao obter estatísticas da estratégia: {e}")
+            self.logger.error(f"❌ Erro ao obter estatísticas da estratégia: {e}")
             return {}

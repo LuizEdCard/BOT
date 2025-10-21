@@ -75,6 +75,18 @@ class KucoinAPI(ExchangeAPI):
                     side='buy',
                     size=str(quantidade)
                 )
+
+                # Mapear 'id' da KuCoin para 'orderId' (compatibilidade com Binance)
+                if order and 'orderId' in order:
+                    # KuCoin retorna 'orderId' diretamente
+                    logger.info(f"✅ Ordem COMPRA KuCoin executada: {order.get('orderId')}")
+                elif order and 'id' in order:
+                    # Mapear 'id' → 'orderId' para compatibilidade
+                    order['orderId'] = order['id']
+                    logger.info(f"✅ Ordem COMPRA KuCoin executada: {order.get('id')}")
+                else:
+                    logger.warning(f"⚠️ Resposta KuCoin sem ID: {order}")
+
                 return order
             except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
                 logger.warning(f"⚠️ Falha na API da KuCoin (tentativa {tentativa + 1}/{max_retries}): {e}")
@@ -98,6 +110,18 @@ class KucoinAPI(ExchangeAPI):
                     side='sell',
                     size=str(quantidade)
                 )
+
+                # Mapear 'id' da KuCoin para 'orderId' (compatibilidade com Binance)
+                if order and 'orderId' in order:
+                    # KuCoin retorna 'orderId' diretamente
+                    logger.info(f"✅ Ordem VENDA KuCoin executada: {order.get('orderId')}")
+                elif order and 'id' in order:
+                    # Mapear 'id' → 'orderId' para compatibilidade
+                    order['orderId'] = order['id']
+                    logger.info(f"✅ Ordem VENDA KuCoin executada: {order.get('id')}")
+                else:
+                    logger.warning(f"⚠️ Resposta KuCoin sem ID: {order}")
+
                 return order
             except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
                 logger.warning(f"⚠️ Falha na API da KuCoin (tentativa {tentativa + 1}/{max_retries}): {e}")

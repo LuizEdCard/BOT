@@ -111,7 +111,8 @@ class DatabaseManager:
                     saldo_usdt_antes REAL,
                     saldo_usdt_depois REAL,
                     order_id TEXT,  -- ID da ordem na Binance
-                    observacao TEXT
+                    observacao TEXT,
+                    estrategia TEXT  -- 'DCA', 'SELL', 'SWING_TRADE', etc
                 )
             """)
 
@@ -202,6 +203,28 @@ class DatabaseManager:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_saldos_timestamp ON saldos(timestamp)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_precos_timestamp ON precos(timestamp)")
 
+            # Garantir que a coluna 'order_id' existe em bancos de dados existentes
+            try:
+                cursor.execute("ALTER TABLE ordens ADD COLUMN order_id TEXT")
+                logger.info("✅ Coluna 'order_id' adicionada à tabela 'ordens'")
+            except sqlite3.OperationalError as e:
+                # Coluna já existe
+                if "duplicate column name" in str(e).lower():
+                    logger.debug("Coluna 'order_id' já existe na tabela 'ordens'")
+                else:
+                    raise
+
+            # Garantir que a coluna 'estrategia' existe em bancos de dados existentes
+            try:
+                cursor.execute("ALTER TABLE ordens ADD COLUMN estrategia TEXT")
+                logger.info("✅ Coluna 'estrategia' adicionada à tabela 'ordens'")
+            except sqlite3.OperationalError as e:
+                # Coluna já existe
+                if "duplicate column name" in str(e).lower():
+                    logger.debug("Coluna 'estrategia' já existe na tabela 'ordens'")
+                else:
+                    raise
+
         logger.info("✅ Banco de dados criado/verificado com sucesso")
 
     def registrar_ordem(self, dados: Dict[str, Any]) -> int:
@@ -209,7 +232,7 @@ class DatabaseManager:
         Registra uma ordem de compra ou venda no banco.
 
         Args:
-            dados: Dicionário com os dados da ordem
+            dados: Dicionário com os dados da ordem (deve incluir 'estrategia')
 
         Returns:
             ID da ordem inserida
@@ -224,8 +247,8 @@ class DatabaseManager:
                     preco_medio_antes, preco_medio_depois,
                     saldo_ada_antes, saldo_ada_depois,
                     saldo_usdt_antes, saldo_usdt_depois,
-                    order_id, observacao
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    order_id, observacao, estrategia
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 dados.get('timestamp', datetime.now().isoformat()),
                 dados['tipo'],
@@ -244,7 +267,8 @@ class DatabaseManager:
                 decimal_para_float(dados.get('saldo_usdt_antes')),
                 decimal_para_float(dados.get('saldo_usdt_depois')),
                 dados.get('order_id'),
-                dados.get('observacao')
+                dados.get('observacao'),
+                dados.get('estrategia')
             ))
 
             return cursor.lastrowid
@@ -552,8 +576,8 @@ class DatabaseManager:
                     cursor.execute("""
                         INSERT INTO ordens (
                             timestamp, tipo, par, quantidade, preco, valor_total, taxa,
-                            order_id, observacao
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            order_id, observacao, estrategia
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         timestamp,
                         tipo,
@@ -563,7 +587,8 @@ class DatabaseManager:
                         valor_total,
                         taxa,
                         order_id,
-                        f"Importado do histórico da Binance - Status: {ordem.get('status')}"
+                        f"Importado do histórico da Binance - Status: {ordem.get('status')}",
+                        'acumulacao'  # Ordens importadas são atribuídas à estratégia de acumulação
                     ))
 
                     importadas += 1

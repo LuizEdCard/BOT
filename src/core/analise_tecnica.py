@@ -4,6 +4,8 @@ Análise Técnica - Cálculo de Médias Móveis e Indicadores
 from decimal import Decimal
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
+import pandas as pd
+import pandas_ta as ta
 
 from src.utils.logger import get_loggers
 
@@ -255,3 +257,31 @@ class AnaliseTecnica:
             'volatilidade': volatilidade,
             'num_candles': len(klines)
         }
+
+    def get_rsi(self, par, timeframe='4h', periodo=14, limite_candles=100) -> Optional[Decimal]:
+        """Busca o valor do RSI para um par de moedas."""
+        try:
+            klines = self.api.obter_klines(par, timeframe, limite_candles)
+            if not klines:
+                return None
+
+            # Fix: Handle variable number of columns from different exchanges
+            # Some exchanges return 6 columns, others 7 or more
+            if len(klines[0]) >= 6:
+                # Take only the first 6 columns we need
+                klines_clean = [[k[0], k[1], k[2], k[3], k[4], k[5]] for k in klines]
+                df = pd.DataFrame(klines_clean, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            else:
+                logger.error(f"Insufficient kline data columns: {len(klines[0])} < 6")
+                return None
+                
+            df['close'] = pd.to_numeric(df['close'])
+
+            rsi = df.ta.rsi(length=periodo)
+            if rsi is None or rsi.empty:
+                return None
+
+            return Decimal(str(rsi.iloc[-1]))
+        except Exception as e:
+            logger.error(f"Erro ao calcular RSI para {par}: {e}")
+            return None

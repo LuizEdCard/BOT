@@ -4,6 +4,7 @@ import threading
 import time
 import os
 import sys
+import asyncio
 import psutil
 from datetime import datetime
 from dotenv import load_dotenv
@@ -15,6 +16,7 @@ from src.exchange.binance_api import BinanceAPI
 from src.exchange.kucoin_api import KucoinAPI
 from src.core.bot_worker import BotWorker
 from src.telegram_bot import TelegramBot
+from src.utils.notifier import Notifier
 from src.utils.logger import get_loggers # Supondo que a função agora retorne os 2 loggers
 
 # Carrega as variáveis de ambiente (API keys) do arquivo .env
@@ -126,25 +128,36 @@ def gerar_relatorio_detalhado(bot_workers, inicio_gerente):
                 par = status.get('par', 'N/A')
                 estado = status.get('estado_bot', 'N/A')
 
-                # Dados de posição
-                posicao = status.get('status_posicao', {})
-                quantidade = posicao.get('quantidade', 0)
-                preco_medio = posicao.get('preco_medio', 0)
-                lp_pct = posicao.get('lucro_percentual', 0)
-                lp_usdt = posicao.get('lucro_usdt', 0)
+                # Dados de posição (carteiras separadas)
+                posicao_acumulacao = status.get('status_posicao_acumulacao', {})
+                posicao_giro = status.get('status_posicao_giro_rapido', {})
+
+                qtd_acum = posicao_acumulacao.get('quantidade', 0)
+                pm_acum = posicao_acumulacao.get('preco_medio', 0)
+                lp_pct_acum = posicao_acumulacao.get('lucro_percentual', 0)
+                lp_usdt_acum = posicao_acumulacao.get('lucro_usdt', 0)
+                valor_acum = posicao_acumulacao.get('valor_total', 0)
+
+                qtd_giro = posicao_giro.get('quantidade', 0)
+                pm_giro = posicao_giro.get('preco_medio', 0)
+                lp_pct_giro = posicao_giro.get('lucro_percentual', 0)
+                lp_usdt_giro = posicao_giro.get('lucro_usdt', 0)
+                valor_giro = posicao_giro.get('valor_total', 0)
+                hwm_giro = posicao_giro.get('high_water_mark', 0)
 
                 # Dados 24h
                 compras_24h = status.get('compras_24h', 0)
                 vendas_24h = status.get('vendas_24h', 0)
                 lucro_realizado_24h = status.get('lucro_realizado_24h', 0)
 
-                # Saldo disponível
+                # Saldo disponível e totais
                 saldo_usdt = status.get('saldo_disponivel_usdt', 0)
-                valor_posicao = posicao.get('valor_total', 0)
+                valor_total_posicoes = Decimal(str(valor_acum)) + Decimal(str(valor_giro))
+                lp_usdt_total = Decimal(str(lp_usdt_acum)) + Decimal(str(lp_usdt_giro))
 
                 # Atualizar totais globais
-                total_capital_global += Decimal(str(saldo_usdt)) + Decimal(str(valor_posicao))
-                total_lucro_nao_realizado += Decimal(str(lp_usdt))
+                total_capital_global += Decimal(str(saldo_usdt)) + valor_total_posicoes
+                total_lucro_nao_realizado += lp_usdt_total
                 total_lucro_realizado_24h += Decimal(str(lucro_realizado_24h))
 
                 # Formatar seção do bot
@@ -154,8 +167,30 @@ def gerar_relatorio_detalhado(bot_workers, inicio_gerente):
                 linhas.extend([
                     f"🤖 *BOT: {nome}-{exchange}* `({par})`",
                     f"*Estado:* {estado}",
-                    f"*Posição:* `{quantidade:.1f} {ativo_base}` @ `${preco_medio:.4f}`",
-                    f"*L/P Posição:* {lp_pct:+.2f}% ({lp_usdt:+.2f} USDT)",
+                    ""
+                ])
+
+                # Carteira Acumulação
+                if qtd_acum > 0:
+                    linhas.extend([
+                        f"📊 *ACUMULAÇÃO:* `{qtd_acum:.1f} {ativo_base}` @ `${pm_acum:.4f}`",
+                        f"   L/P: {lp_pct_acum:+.2f}% ({lp_usdt_acum:+.2f} USDT) | Valor: ${valor_acum:.2f}"
+                    ])
+                else:
+                    linhas.append("📊 *ACUMULAÇÃO:* SEM POSIÇÃO")
+
+                # Carteira Giro Rápido
+                if qtd_giro > 0:
+                    linhas.extend([
+                        f"🎯 *GIRO RÁPIDO:* `{qtd_giro:.1f} {ativo_base}` @ `${pm_giro:.4f}`",
+                        f"   L/P: {lp_pct_giro:+.2f}% ({lp_usdt_giro:+.2f} USDT) | Valor: ${valor_giro:.2f}",
+                        f"   HWM: {hwm_giro:.2f}%"
+                    ])
+                else:
+                    linhas.append("🎯 *GIRO RÁPIDO:* SEM POSIÇÃO")
+
+                linhas.extend([
+                    "",
                     f"*Desempenho 24h:* {compras_24h} Compra(s) | {vendas_24h} Venda(s)",
                     f"*Lucro Realizado 24h:* {lucro_realizado_24h:+.2f} USDT",
                     ""
@@ -255,16 +290,8 @@ def main():
 
         logger.info(f"✅ Configuração carregada: Lançando bot '{config_instancia['nome_instancia']}' para o par '{config_instancia['par']}' na exchange '{config_instancia['exchange']}'.")
 
-        bot_worker = BotWorker(config=config_instancia, exchange_api=api)
+        bot_worker = BotWorker(config=config_instancia, exchange_api=api, telegram_notifier=None, notifier=None) # notifier será atualizado depois
         bot_workers.append(bot_worker)
-        
-        thread = threading.Thread(target=bot_worker.run, name=config_instancia['nome_instancia'])
-        thread.start()
-        threads.append(thread)
-        
-        time.sleep(5) 
-
-    logger.info(f"✅ {len(threads)} instâncias de bot iniciadas e a operar em background.")
 
     # Função de desligamento gracioso
     def shutdown_callback():
@@ -289,31 +316,50 @@ def main():
         logger.info("✅ Todos os bots foram parados")
         logger.info("🛑 Encerrando processo principal...")
         sys.exit(0)
-    
+
     # Inicia o bot do Telegram
     telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
     authorized_user_id = os.getenv("TELEGRAM_AUTHORIZED_USER_ID")
     telegram_bot = None
+    notifier = None
 
     if telegram_token and authorized_user_id:
         logger.info("🤖 Iniciando o bot do Telegram...")
         telegram_bot = TelegramBot(
-            token=telegram_token, 
-            authorized_user_id=int(authorized_user_id), 
+            token=telegram_token,
+            authorized_user_id=int(authorized_user_id),
             workers=bot_workers,
             shutdown_callback=shutdown_callback
         )
-        
+
+        # Criar instância do Notifier
+        logger.info("📢 Criando instância do Notifier...")
+        notifier = Notifier(telegram_bot=telegram_bot, authorized_user_id=int(authorized_user_id))
+
+        # Atualizar notifier e telegram_notifier nos workers
+        for worker in bot_workers:
+            worker.telegram_notifier = telegram_bot
+            worker.notifier = notifier
+            logger.info(f"✅ Notifier integrado ao worker '{worker.config.get('nome_instancia', 'N/A')}'")
+    else:
+        logger.warning("⚠️  Variáveis de ambiente do Telegram (TELEGRAM_BOT_TOKEN, TELEGRAM_AUTHORIZED_USER_ID) não configuradas. Bot do Telegram e Notifier não iniciados.")
+
+    for bot_worker in bot_workers:
+        thread = threading.Thread(target=bot_worker.run, name=bot_worker.config['exchange'].capitalize())
+        threads.append(thread)
+
+    if telegram_bot:
         def run_telegram_bot():
-            import asyncio
             asyncio.run(telegram_bot.run())
         
         telegram_thread = threading.Thread(target=run_telegram_bot, name="TelegramBot")
         telegram_thread.daemon = True
         telegram_thread.start()
         logger.info("✅ Bot do Telegram iniciado em background.")
-    else:
-        logger.warning("⚠️  Variáveis de ambiente do Telegram (TELEGRAM_BOT_TOKEN, TELEGRAM_AUTHORIZED_USER_ID) não configuradas. Bot do Telegram não iniciado.")
+
+    for thread in threads:
+        thread.start()
+        time.sleep(5)
 
     try:
         while not shutdown_flag['shutdown']:
@@ -346,30 +392,55 @@ def main():
                 par = status.get('par', 'N/A')
                 ativo_base = status.get('ativo_base', par.split('/')[0] if '/' in par else 'N/A')
                 quote_currency = par.split('/')[1] if '/' in par else 'USDT'
-                posicao = status.get('status_posicao', {})
+
+                # Posições das duas carteiras
+                posicao_acumulacao = status.get('status_posicao_acumulacao', {})
+                posicao_giro_rapido = status.get('status_posicao_giro_rapido', {})
+
                 saldo_usdt_disponivel = status.get('saldo_disponivel_usdt', Decimal('0'))
-                valor_posicao_usdt = posicao.get('valor_total', Decimal('0'))
+                valor_posicao_acumulacao = posicao_acumulacao.get('valor_total', Decimal('0'))
+                valor_posicao_giro = posicao_giro_rapido.get('valor_total', Decimal('0'))
+                valor_posicao_total = valor_posicao_acumulacao + valor_posicao_giro
 
                 # Calcular totais globais
-                total_capital_global += valor_posicao_usdt + saldo_usdt_disponivel
-                total_lucro_usdt_global += posicao.get('lucro_usdt', Decimal('0'))
+                total_capital_global += valor_posicao_total + saldo_usdt_disponivel
+                total_lucro_usdt_global += posicao_acumulacao.get('lucro_usdt', Decimal('0')) + posicao_giro_rapido.get('lucro_usdt', Decimal('0'))
 
                 # Imprimir informações do bot
                 panel_logger.info(f"║ 🤖 Bot: {status['nome_instancia']} ({par}) | 🕒 Uptime: {status['uptime']}")
                 panel_logger.info(f"║    🧠 Estado: {status['estado_bot']}")
                 panel_logger.info(f"║    💰 Saldo {quote_currency}: ${saldo_usdt_disponivel:.2f}")
-                
+
                 preco_atual_str = f"${status.get('preco_atual', 0):.6f}"
                 sma_ref_str = f"${status.get('sma_referencia', 0):.6f}" if status.get('sma_referencia') is not None else "N/A"
                 dist_sma_str = f"{status.get('distancia_sma', 0):.2f}%" if status.get('distancia_sma') is not None else "N/A"
                 panel_logger.info(f"║    📈 Preço {ativo_base}: {preco_atual_str} | SMA Ref: {sma_ref_str} | Dist SMA: {dist_sma_str}")
-                
-                pm_str = f"${posicao.get('preco_medio', 0):.6f}" if posicao.get('preco_medio') else "N/A"
-                panel_logger.info(f"║    📊 Posição: {posicao.get('quantidade', 0):.2f} {ativo_base} | PM: {pm_str} | Total: ${valor_posicao_usdt:.2f}")
-                
-                lp_perc_str = f"{posicao.get('lucro_percentual', 0):.2f}%" if posicao.get('lucro_percentual') is not None else "N/A"
-                lp_usdt_str = f"${posicao.get('lucro_usdt', 0):.2f}"
-                panel_logger.info(f"║    💹 L/P: {lp_perc_str} ({lp_usdt_str})")
+
+                # ═══════════════════════════════════════
+                # CARTEIRA ACUMULAÇÃO
+                # ═══════════════════════════════════════
+                pm_acum_str = f"${posicao_acumulacao.get('preco_medio', 0):.6f}" if posicao_acumulacao.get('preco_medio') else "N/A"
+                lp_perc_acum = posicao_acumulacao.get('lucro_percentual', 0)
+                lp_perc_acum_str = f"{lp_perc_acum:.2f}%" if lp_perc_acum is not None else "N/A"
+                lp_usdt_acum = posicao_acumulacao.get('lucro_usdt', 0)
+
+                panel_logger.info(f"║    📊 ACUMULAÇÃO: {posicao_acumulacao.get('quantidade', 0):.2f} {ativo_base} | PM: {pm_acum_str} | Total: ${valor_posicao_acumulacao:.2f}")
+                panel_logger.info(f"║       💹 L/P: {lp_perc_acum_str} (${lp_usdt_acum:.2f})")
+
+                # ═══════════════════════════════════════
+                # CARTEIRA GIRO RÁPIDO
+                # ═══════════════════════════════════════
+                if posicao_giro_rapido.get('quantidade', 0) > 0:
+                    pm_giro_str = f"${posicao_giro_rapido.get('preco_medio', 0):.6f}" if posicao_giro_rapido.get('preco_medio') else "N/A"
+                    lp_perc_giro = posicao_giro_rapido.get('lucro_percentual', 0)
+                    lp_perc_giro_str = f"{lp_perc_giro:.2f}%" if lp_perc_giro is not None else "N/A"
+                    lp_usdt_giro = posicao_giro_rapido.get('lucro_usdt', 0)
+                    hwm_giro = posicao_giro_rapido.get('high_water_mark', 0)
+
+                    panel_logger.info(f"║    🎯 GIRO RÁPIDO: {posicao_giro_rapido.get('quantidade', 0):.2f} {ativo_base} | PM: {pm_giro_str} | Total: ${valor_posicao_giro:.2f}")
+                    panel_logger.info(f"║       💹 L/P: {lp_perc_giro_str} (${lp_usdt_giro:.2f}) | HWM: {hwm_giro:.2f}%")
+                else:
+                    panel_logger.info(f"║    🎯 GIRO RÁPIDO: SEM POSIÇÃO")
 
                 if status.get('ultima_compra'):
                     compra = status['ultima_compra']
@@ -397,13 +468,19 @@ def main():
 
                     # Enviar mensagem via Telegram
                     try:
-                        import asyncio
-                        # Criar task para enviar mensagem via Telegram de forma assíncrona
-                        asyncio.run(telegram_bot.enviar_mensagem(
-                            user_id=int(authorized_user_id),
-                            mensagem=mensagem_relatorio
-                        ))
-                        logger.info("✅ Relatório horário enviado via Telegram com sucesso!")
+                        if telegram_bot and telegram_bot.loop:
+                            future = asyncio.run_coroutine_threadsafe(
+                                telegram_bot.enviar_mensagem(
+                                    user_id=int(authorized_user_id),
+                                    mensagem=mensagem_relatorio
+                                ),
+                                telegram_bot.loop
+                            )
+                            future.result()  # Wait for the result
+                            logger.info("✅ Relatório horário enviado via Telegram com sucesso!")
+                        else:
+                            logger.warning("⚠️  Bot do Telegram não está em execução, não é possível enviar o relatório.")
+
                     except Exception as e:
                         logger.error(f"❌ Erro ao enviar relatório via Telegram: {e}")
                         logger.info(f"📊 Conteúdo do relatório:\n{mensagem_relatorio}")

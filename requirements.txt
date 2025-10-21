@@ -4,3 +4,6 @@ requests
 kucoin-python
 colorama
 psutil
+pandas
+pandas-ta
+pandas-ta

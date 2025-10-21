@@ -9,9 +9,6 @@ from datetime import datetime
 
 from src.core.position_manager import PositionManager
 from src.persistencia.state_manager import StateManager
-from src.utils.logger import get_loggers
-
-logger, _ = get_loggers()
 
 
 class StrategySell:
@@ -25,19 +22,28 @@ class StrategySell:
     """
     
     def __init__(
-        self, 
-        config: Dict[str, Any], 
+        self,
+        config: Dict[str, Any],
         position_manager: PositionManager,
-        state_manager: StateManager
+        state_manager: StateManager,
+        logger=None
     ):
         """
         Inicializa a estratégia de vendas
-        
+
         Args:
             config: Configurações da estratégia
             position_manager: Gerenciador de posições
             state_manager: Gerenciador de estado
+            logger: Logger contextual (opcional)
         """
+        # Logger contextual (fallback para logger global se não fornecido)
+        if logger:
+            self.logger = logger
+        else:
+            from src.utils.logger import get_loggers
+            self.logger, _ = get_loggers()
+
         self.config = config
         self.position_manager = position_manager
         self.state = state_manager
@@ -55,10 +61,10 @@ class StrategySell:
         # Carregar estado persistente
         self._carregar_estado_hwm()
         
-        logger.debug(f"💰 Estratégia de vendas inicializada:")
-        logger.debug(f"   Metas fixas: {len(self.metas_venda)}")
-        logger.debug(f"   Vendas de segurança: {len(self.vendas_seguranca)}")
-        logger.debug(f"   High-Water Mark atual: {self.high_water_mark_profit:.2f}%")
+        self.logger.debug(f"💰 Estratégia de vendas inicializada:")
+        self.logger.debug(f"   Metas fixas: {len(self.metas_venda)}")
+        self.logger.debug(f"   Vendas de segurança: {len(self.vendas_seguranca)}")
+        self.logger.debug(f"   High-Water Mark atual: {self.high_water_mark_profit:.2f}%")
     
     def verificar_oportunidade(self, preco_atual: Decimal) -> Optional[Dict[str, Any]]:
         """
@@ -73,13 +79,13 @@ class StrategySell:
         try:
             # Verificar se há posição para vender
             if not self.position_manager.tem_posicao():
-                logger.debug("📊 Sem posição para vender")
+                self.logger.debug("📊 Sem posição para vender")
                 return None
             
             # Calcular lucro atual
             lucro_atual = self.position_manager.calcular_lucro_atual(preco_atual)
             if lucro_atual is None or lucro_atual <= 0:
-                logger.debug(f"📊 Sem lucro para vender (atual: {lucro_atual:.2f}%)" if lucro_atual else "📊 Sem lucro calculável")
+                self.logger.debug(f"📊 Sem lucro para vender (atual: {lucro_atual:.2f}%)" if lucro_atual else "📊 Sem lucro calculável")
                 return None
             
             # Atualizar High-Water Mark
@@ -99,7 +105,7 @@ class StrategySell:
             return None
             
         except Exception as e:
-            logger.error(f"❌ Erro ao verificar oportunidade de venda: {e}")
+            self.logger.error(f"❌ Erro ao verificar oportunidade de venda: {e}")
             return None
     
     def _verificar_metas_fixas(self, lucro_atual: Decimal, preco_atual: Decimal) -> Optional[Dict[str, Any]]:
@@ -125,7 +131,7 @@ class StrategySell:
             meta_lucro_pct = Decimal(str(meta['lucro_percentual']))
             
             if lucro_atual >= meta_lucro_pct:
-                logger.info(f"🎯 Meta fixa {meta['meta']} atingida ({meta_lucro_pct}%)")
+                self.logger.info(f"🎯 Meta fixa {meta['meta']} atingida ({meta_lucro_pct}%)")
                 
                 # Calcular quantidade a vender
                 quantidade_total = self.position_manager.get_quantidade_total()
@@ -138,7 +144,7 @@ class StrategySell:
                 
                 # Validar valor mínimo
                 if not self._validar_ordem_minima(valor_ordem, quantidade_venda):
-                    logger.warning(f"⚠️ Meta {meta['meta']} atingida mas ordem abaixo do mínimo: ${valor_ordem:.2f}")
+                    self.logger.warning(f"⚠️ Meta {meta['meta']} atingida mas ordem abaixo do mínimo: ${valor_ordem:.2f}")
                     continue
                 
                 return {
@@ -196,11 +202,11 @@ class StrategySell:
             
             # Verificar se lucro atual caiu abaixo do gatilho de venda
             if lucro_atual <= gatilho_venda:
-                logger.info(f"🛡️ ZONA DE SEGURANÇA '{nome_zona}' ATIVADA!")
-                logger.info(f"   📊 High-Water Mark: {self.high_water_mark_profit:.2f}%")
-                logger.info(f"   🎯 Gatilho ativação: {gatilho_ativacao_pct:.2f}% (armada ✓)")
-                logger.info(f"   📉 Lucro atual: {lucro_atual:.2f}%")
-                logger.info(f"   🎯 Gatilho venda: {gatilho_venda:.2f}%")
+                self.logger.info(f"🛡️ ZONA DE SEGURANÇA '{nome_zona}' ATIVADA!")
+                self.logger.info(f"   📊 High-Water Mark: {self.high_water_mark_profit:.2f}%")
+                self.logger.info(f"   🎯 Gatilho ativação: {gatilho_ativacao_pct:.2f}% (armada ✓)")
+                self.logger.info(f"   📉 Lucro atual: {lucro_atual:.2f}%")
+                self.logger.info(f"   🎯 Gatilho venda: {gatilho_venda:.2f}%")
                 
                 # Calcular quantidade a vender
                 percentual_venda = Decimal(str(zona['percentual_venda_posicao'])) / Decimal('100')
@@ -212,7 +218,7 @@ class StrategySell:
                 
                 # Validar valor mínimo
                 if not self._validar_ordem_minima(valor_ordem, quantidade_venda):
-                    logger.warning(f"⚠️ Zona {nome_zona} ativada mas ordem abaixo do mínimo: ${valor_ordem:.2f}")
+                    self.logger.warning(f"⚠️ Zona {nome_zona} ativada mas ordem abaixo do mínimo: ${valor_ordem:.2f}")
                     # Marcar como acionada mesmo assim para não tentar novamente
                     self.zonas_de_seguranca_acionadas.add(nome_zona)
                     self._salvar_estado_hwm()
@@ -249,7 +255,7 @@ class StrategySell:
             self.high_water_mark_profit = lucro_atual
             self._salvar_estado_hwm()
             
-            logger.debug(f"📊 High-Water Mark atualizado: {anterior:.2f}% → {lucro_atual:.2f}%")
+            self.logger.debug(f"📊 High-Water Mark atualizado: {anterior:.2f}% → {lucro_atual:.2f}%")
     
     def _arredondar_quantidade(self, quantidade: Decimal) -> Decimal:
         """
@@ -295,7 +301,7 @@ class StrategySell:
             
             # Se foi meta fixa, resetar High-Water Mark e zonas
             if tipo_venda == 'meta_fixa' and oportunidade.get('reset_hwm', True):
-                logger.info("🔄 Resetando High-Water Mark após venda de meta fixa")
+                self.logger.info("🔄 Resetando High-Water Mark após venda de meta fixa")
                 self.high_water_mark_profit = Decimal('0')
                 self.zonas_de_seguranca_acionadas.clear()
                 self.capital_para_recompra.clear()
@@ -320,12 +326,12 @@ class StrategySell:
                 self.zonas_de_seguranca_acionadas.add(nome_zona)
                 self._salvar_estado_hwm()
                 
-                logger.info(f"💰 Capital reservado para recompra: ${valor_ordem:.2f} USDT")
-                logger.info(f"   📌 Zona '{nome_zona}' marcada como acionada")
-                logger.info(f"   🔄 Recompra será ativada se lucro cair {oportunidade['gatilho_recompra_drop']}% desde o pico")
+                self.logger.info(f"💰 Capital reservado para recompra: ${valor_ordem:.2f} USDT")
+                self.logger.info(f"   📌 Zona '{nome_zona}' marcada como acionada")
+                self.logger.info(f"   🔄 Recompra será ativada se lucro cair {oportunidade['gatilho_recompra_drop']}% desde o pico")
             
         except Exception as e:
-            logger.error(f"❌ Erro ao registrar venda executada: {e}")
+            self.logger.error(f"❌ Erro ao registrar venda executada: {e}")
     
     def verificar_recompra_de_seguranca(self, preco_atual: Decimal) -> Optional[Dict[str, Any]]:
         """
@@ -357,11 +363,11 @@ class StrategySell:
             
             # Verificar se lucro atual caiu abaixo do gatilho
             if lucro_atual <= gatilho_recompra:
-                logger.info(f"🔄 GATILHO DE RECOMPRA ATIVADO - Zona '{nome_zona}'")
-                logger.info(f"   📊 High-Water Mark: {high_mark:.2f}%")
-                logger.info(f"   📉 Lucro atual: {lucro_atual:.2f}%")
-                logger.info(f"   🎯 Gatilho: {gatilho_recompra:.2f}% (queda de {gatilho_recompra_pct:.2f}%)")
-                logger.info(f"   💰 Capital disponível: ${capital_usdt:.2f} USDT")
+                self.logger.info(f"🔄 GATILHO DE RECOMPRA ATIVADO - Zona '{nome_zona}'")
+                self.logger.info(f"   📊 High-Water Mark: {high_mark:.2f}%")
+                self.logger.info(f"   📉 Lucro atual: {lucro_atual:.2f}%")
+                self.logger.info(f"   🎯 Gatilho: {gatilho_recompra:.2f}% (queda de {gatilho_recompra_pct:.2f}%)")
+                self.logger.info(f"   💰 Capital disponível: ${capital_usdt:.2f} USDT")
                 
                 # Calcular quantidade de ADA a comprar
                 quantidade_ada = capital_usdt / preco_atual
@@ -386,7 +392,7 @@ class StrategySell:
                         'marcar_zona_para_remocao': nome_zona
                     }
                 else:
-                    logger.warning(f"⚠️ Recompra ignorada - valor abaixo do mínimo: ${valor_ordem:.2f}")
+                    self.logger.warning(f"⚠️ Recompra ignorada - valor abaixo do mínimo: ${valor_ordem:.2f}")
                     # Remover da lista mesmo assim
                     del self.capital_para_recompra[nome_zona]
                     self._salvar_estado_hwm()
@@ -404,11 +410,11 @@ class StrategySell:
             nome_zona = oportunidade.get('marcar_zona_para_remocao')
             if nome_zona and nome_zona in self.capital_para_recompra:
                 del self.capital_para_recompra[nome_zona]
-                logger.debug(f"✅ Capital de zona '{nome_zona}' removido após recompra")
+                self.logger.debug(f"✅ Capital de zona '{nome_zona}' removido após recompra")
                 self._salvar_estado_hwm()
                 
         except Exception as e:
-            logger.error(f"❌ Erro ao registrar recompra executada: {e}")
+            self.logger.error(f"❌ Erro ao registrar recompra executada: {e}")
     
     def _carregar_estado_hwm(self):
         """Carrega estado persistente do High-Water Mark"""
@@ -435,10 +441,10 @@ class StrategySell:
                                 dados[key] = Decimal(str(dados[key]))
                 self.capital_para_recompra = capital_str
             
-            logger.debug(f"📊 Estado HWM carregado: {self.high_water_mark_profit:.2f}%")
+            self.logger.debug(f"📊 Estado HWM carregado: {self.high_water_mark_profit:.2f}%")
             
         except Exception as e:
-            logger.warning(f"⚠️ Erro ao carregar estado HWM: {e}")
+            self.logger.warning(f"⚠️ Erro ao carregar estado HWM: {e}")
     
     def _salvar_estado_hwm(self):
         """Salva estado persistente do High-Water Mark"""
@@ -459,7 +465,7 @@ class StrategySell:
             self.state.set_state('capital_para_recompra', capital_serializable)
             
         except Exception as e:
-            logger.error(f"❌ Erro ao salvar estado HWM: {e}")
+            self.logger.error(f"❌ Erro ao salvar estado HWM: {e}")
     
     def obter_estatisticas(self) -> Dict[str, Any]:
         """
@@ -485,16 +491,16 @@ class StrategySell:
             }
             
         except Exception as e:
-            logger.error(f"❌ Erro ao obter estatísticas de vendas: {e}")
+            self.logger.error(f"❌ Erro ao obter estatísticas de vendas: {e}")
             return {}
     
     def resetar_estado(self):
         """
         Reseta completamente o estado da estratégia (para testes ou reset manual)
         """
-        logger.warning("🔄 Resetando estado da estratégia de vendas")
+        self.logger.warning("🔄 Resetando estado da estratégia de vendas")
         self.high_water_mark_profit = Decimal('0')
         self.zonas_de_seguranca_acionadas.clear()
         self.capital_para_recompra.clear()
         self._salvar_estado_hwm()
-        logger.info("✅ Estado resetado com sucesso")
+        self.logger.info("✅ Estado resetado com sucesso")
