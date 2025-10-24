@@ -65,6 +65,12 @@ class StrategyDCA:
         self.percentual_minimo_melhora_pm = config.get('PERCENTUAL_MINIMO_MELHORA_PM', 2.0)
         self.gestao_risco = config.get('GESTAO_DE_RISCO', {})
         
+        # Configuração de habilitação da estratégia (padrão: True)
+        # Lê o flag booleano normalizado: config['ESTRATEGIAS']['dca']
+        self.habilitado: bool = bool(
+            self.config.get('ESTRATEGIAS', {}).get('dca', True)
+        )
+
         self.logger.debug(f"🎯 Estratégia DCA inicializada com {len(self.degraus_compra)} degraus")
     
     def verificar_oportunidade(
@@ -85,6 +91,11 @@ class StrategyDCA:
             Dict com detalhes da oportunidade ou None se não houver
         """
         try:
+            # Se estratégia DCA estiver desabilitada nas configs, não faz nada
+            if not self.habilitado:
+                self.logger.info("ℹ️ Estratégia DCA está desabilitada nas configurações; pulando verificações DCA.")
+                return None
+
             # MODO CRASH: Ignorar todas as restrições
             modo_crash = self.worker.modo_crash_ativo if self.worker else False
             
@@ -100,6 +111,11 @@ class StrategyDCA:
             if not degrau_ativo:
                 self.logger.debug(f"📊 Nenhum degrau ativo para queda de {distancia_sma:.2f}%")
                 return None
+
+            # Calcula e adiciona a quantidade_ada ao degrau_ativo
+            percentual_capital = Decimal(str(degrau_ativo['percentual_capital_usar']))
+            capital_para_usar = self.gestao_capital.saldo_usdt * (percentual_capital / Decimal('100'))
+            degrau_ativo['quantidade_ada'] = capital_para_usar / preco_atual
 
             # Adicionar verificação de RSI
             rsi_limite_compra = Decimal(str(self.config.get('RSI_LIMITE_COMPRA', 30)))
@@ -142,7 +158,7 @@ class StrategyDCA:
                 'quantidade': quantidade_ada,
                 'preco_atual': preco_atual,
                 'valor_ordem': valor_ordem,
-                'queda_percentual': degrau_ativo['queda_percentual'],
+                'queda_percentual': degrau_ativo['gatilho_distancia_sma'],  # CORREÇÃO AQUI
                 'distancia_sma': distancia_sma,
                 'degrau_config': degrau_ativo,
                 'motivo': f"Degrau {degrau_ativo['nivel']} - Queda {distancia_sma:.2f}%"
@@ -287,8 +303,9 @@ class StrategyDCA:
             Dicionário do degrau ativo ou None
         """
         for degrau in self.degraus_compra:
-            queda_necessaria = Decimal(str(degrau['queda_percentual']))
+            queda_necessaria = Decimal(str(degrau['gatilho_distancia_sma']))
             if distancia_sma >= queda_necessaria:
+                degrau['queda_percentual'] = queda_necessaria # Adiciona a chave que faltava
                 return degrau
         return None
     

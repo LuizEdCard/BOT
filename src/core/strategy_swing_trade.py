@@ -38,7 +38,8 @@ class StrategySwingTrade:
         position_manager: PositionManager,
         gestao_capital: GestaoCapital,
         logger=None,
-        notifier=None
+        notifier=None,
+        exchange_api=None
     ):
         """
         Inicializa a estratégia de swing trade
@@ -49,6 +50,7 @@ class StrategySwingTrade:
             gestao_capital: Gerenciador de capital
             logger: Logger contextual (opcional)
             notifier: Instância do Notifier para notificações
+            exchange_api: API da exchange para buscar histórico de preços (opcional)
         """
         # Logger contextual (fallback para logger global se não fornecido)
         if logger:
@@ -61,10 +63,13 @@ class StrategySwingTrade:
         self.position_manager = position_manager
         self.gestao_capital = gestao_capital
         self.notifier = notifier
+        self.exchange_api = exchange_api
 
-        # Configuração da estratégia
+        # Verificação de habilitação da estratégia usando flag normalizado
+        self.habilitado = bool(config.get('ESTRATEGIAS', {}).get('giro_rapido', False))
+        
+        # Configuração da estratégia (fallback para formato antigo)
         self.estrategia_config = config.get('estrategia_giro_rapido', {})
-        self.habilitado = self.estrategia_config.get('habilitado', False)
 
         if not self.habilitado:
             self.logger.info("📈 Estratégia de Giro Rápido DESABILITADA")
@@ -88,6 +93,8 @@ class StrategySwingTrade:
         self.preco_referencia_maxima: Optional[Decimal] = None  # Máxima recente para gatilho de compra
         self.ultima_compra_timestamp: Optional[float] = None  # Timestamp da última compra para cooldown
         self.cooldown_segundos: int = 60  # Cooldown mínimo entre compras (60 segundos)
+        self._inicializado_com_historico: bool = False  # Flag para saber se já buscou histórico
+        self.ultima_log_status: Optional[float] = None  # Timestamp do último log de status (throttle 1 min)
 
         # Configurar alocação na gestão de capital
         self.gestao_capital.configurar_alocacao_giro_rapido(self.alocacao_capital_pct)
@@ -97,6 +104,32 @@ class StrategySwingTrade:
         self.logger.info(f"   Gatilho compra: queda de {self.gatilho_compra_pct}%")
         self.logger.info(f"   Meta lucro: {self.meta_lucro_pct}%")
         self.logger.info(f"   Proteção: ativa em {self.protecao_ativacao_pct}%, vende se cair {self.protecao_reversao_pct}%")
+
+        # IMPORTANTE: Inicializar preço de referência com histórico IMEDIATAMENTE
+        # Isso evita que o primeiro preço consultado seja usado como referência
+        # antes de buscar o histórico
+        self.logger.info("🔍 Inicializando preço de referência com histórico ao construir estratégia...")
+        self.logger.info(f"   🔧 exchange_api disponível: {self.exchange_api is not None}")
+        self.logger.info(f"   🔧 Tipo da exchange_api: {type(self.exchange_api).__name__ if self.exchange_api else 'None'}")
+
+        if self.exchange_api:
+            try:
+                par_config = self.config.get('par', 'XRP/USDT')
+                self.logger.info(f"   🔧 Par configurado: {par_config}")
+
+                preco_inicial = Decimal(str(self.exchange_api.get_preco_atual(par_config)))
+                self.logger.info(f"   🔧 Preço inicial obtido: ${preco_inicial:.6f}")
+
+                self._inicializar_preco_referencia_com_historico(preco_inicial)
+                self._inicializado_com_historico = True
+                self.logger.info(f"   ✅ Inicialização com histórico CONCLUÍDA no construtor")
+            except Exception as e:
+                self.logger.error(f"❌ Erro ao inicializar histórico no construtor: {e}")
+                import traceback
+                self.logger.error(f"Traceback completo:\n{traceback.format_exc()}")
+                self.logger.warning("⚠️ Inicialização com histórico será feita na primeira verificação")
+        else:
+            self.logger.warning("⚠️ exchange_api NÃO está disponível - histórico NÃO será inicializado")
 
     def verificar_oportunidade(self, preco_atual: Decimal) -> Optional[Dict[str, Any]]:
         """
@@ -109,6 +142,7 @@ class StrategySwingTrade:
             Dict com dados da oportunidade ou None
         """
         if not self.habilitado:
+            self.logger.debug("📈 Giro Rápido: estratégia desabilitada")
             return None
 
         # Atualizar preço de referência máxima
@@ -116,6 +150,20 @@ class StrategySwingTrade:
 
         # Verificar se já tem posição
         tem_posicao = self.position_manager.tem_posicao('giro_rapido')
+        quantidade = self.position_manager.get_quantidade_total('giro_rapido')
+
+        # Log de estado a cada 60 segundos (não a cada verificação para evitar spam)
+        import time
+        tempo_atual = time.time()
+        if self.ultima_log_status is None or (tempo_atual - self.ultima_log_status) >= 60:
+            ref_max_str = f"${self.preco_referencia_maxima:.6f}" if self.preco_referencia_maxima else "None"
+            self.logger.info(
+                f"📊 Giro Rápido | Preço: ${preco_atual:.6f} | "
+                f"Ref Máx: {ref_max_str} | "
+                f"Posição: {quantidade:.4f} | "
+                f"Status: {'COM posição' if tem_posicao else 'SEM posição'}"
+            )
+            self.ultima_log_status = tempo_atual
 
         if not tem_posicao:
             # SEM POSIÇÃO: Verificar oportunidade de COMPRA
@@ -131,9 +179,87 @@ class StrategySwingTrade:
         Args:
             preco_atual: Preço atual do ativo
         """
-        if self.preco_referencia_maxima is None or preco_atual > self.preco_referencia_maxima:
+        if not self._inicializado_com_historico:
+            # Primeira inicialização OU após venda: usar HISTÓRICO se disponível
+            self._inicializar_preco_referencia_com_historico(preco_atual)
+            self._inicializado_com_historico = True
+        elif preco_atual > self.preco_referencia_maxima:
+            # Atualizar quando houver novo máximo
             self.preco_referencia_maxima = preco_atual
             self.logger.debug(f"📊 Preço referência máxima atualizado: ${preco_atual:.6f}")
+
+    def _inicializar_preco_referencia_com_historico(self, preco_atual: Decimal):
+        """
+        Inicializa preço de referência buscando o máximo dos últimos candles.
+
+        Se a API estiver disponível, busca os últimos 24 candles de 1 hora (24 horas)
+        e usa o preço máximo como referência. Isso evita perder oportunidades de compra
+        quando o bot inicia após uma queda de preço já ter ocorrido.
+
+        Args:
+            preco_atual: Preço atual como fallback
+        """
+        if self.exchange_api is None:
+            # Sem API: usar preço atual
+            self.preco_referencia_maxima = preco_atual
+            self.logger.warning(f"⚠️ Sem API disponível - inicializando com preço atual: ${preco_atual:.6f}")
+            return
+
+        try:
+            # Buscar últimos 24 candles de 1 hora (24 horas de histórico)
+            par = self.config.get('par', 'XRP/USDT')
+            # Manter o formato com barra para que a API da exchange converta corretamente
+            # (KuCoin converte / para -, Binance mantém sem separador)
+
+            self.logger.info(f"🔍 Buscando histórico de preços para inicializar referência máxima...")
+            self.logger.info(f"   🔧 Par: {par}, Intervalo: 1h, Limite: 24 candles")
+
+            klines = self.exchange_api.obter_klines(
+                simbolo=par,
+                intervalo='1h',
+                limite=24
+            )
+
+            self.logger.info(f"   🔧 Klines recebidas: {len(klines) if klines else 0} candles")
+
+            if klines and len(klines) > 0:
+                self.logger.info(f"   🔧 Primeiro candle: {klines[0][:5] if len(klines[0]) > 5 else klines[0]}")
+                self.logger.info(f"   🔧 Último candle: {klines[-1][:5] if len(klines[-1]) > 5 else klines[-1]}")
+
+                # Extrair preços máximos de cada candle
+                # Formato kline: [timestamp, open, high, low, close, volume, ...]
+                precos_maximos = [Decimal(str(candle[2])) for candle in klines]  # índice 2 = high
+                preco_maximo_historico = max(precos_maximos)
+
+                self.logger.info(f"   🔧 Preços máximos extraídos: {len(precos_maximos)} valores")
+                self.logger.info(f"   🔧 Máximo histórico calculado: ${preco_maximo_historico:.6f}")
+
+                self.preco_referencia_maxima = preco_maximo_historico
+
+                self.logger.info(f"✅ Preço de referência inicializado com HISTÓRICO:")
+                self.logger.info(f"   📊 Máxima dos últimos {len(klines)} candles (1h): ${preco_maximo_historico:.6f}")
+                self.logger.info(f"   📊 Preço atual: ${preco_atual:.6f}")
+
+                # Calcular se já está em queda
+                queda_atual = ((preco_maximo_historico - preco_atual) / preco_maximo_historico) * Decimal('100')
+                if queda_atual >= self.gatilho_compra_pct:
+                    self.logger.warning(f"⚠️ ATENÇÃO: Preço já caiu {queda_atual:.2f}% desde a máxima recente!")
+                    self.logger.warning(f"   🎯 Gatilho de compra PODE SER ATIVADO nesta verificação!")
+                else:
+                    self.logger.info(f"   📉 Queda atual: {queda_atual:.2f}% (gatilho: {self.gatilho_compra_pct}%)")
+            else:
+                # Fallback: usar preço atual
+                self.preco_referencia_maxima = preco_atual
+                self.logger.warning(f"⚠️ Histórico vazio - usando preço atual: ${preco_atual:.6f}")
+                self.logger.warning(f"   🔧 Klines retornadas: {klines}")
+
+        except Exception as e:
+            # Em caso de erro, usar preço atual como fallback
+            self.preco_referencia_maxima = preco_atual
+            self.logger.error(f"❌ Erro ao buscar histórico: {e}")
+            import traceback
+            self.logger.error(f"   🔧 Traceback detalhado:\n{traceback.format_exc()}")
+            self.logger.warning(f"⚠️ Usando preço atual como fallback: ${preco_atual:.6f}")
 
     def _verificar_oportunidade_compra(self, preco_atual: Decimal) -> Optional[Dict[str, Any]]:
         """
@@ -145,8 +271,11 @@ class StrategySwingTrade:
         Returns:
             Dict com dados da oportunidade de compra ou None
         """
+        # Proteção adicional: se por algum motivo preco_referencia_maxima ainda for None,
+        # inicializar (não deveria acontecer pois _atualizar_preco_referencia já faz isso)
         if self.preco_referencia_maxima is None:
-            return None
+            self.logger.warning("⚠️ Preço de referência None em _verificar_oportunidade_compra (não deveria acontecer)")
+            self._inicializar_preco_referencia_com_historico(preco_atual)
 
         # VERIFICAR COOLDOWN: Evitar múltiplas compras em sequência rápida
         if self.ultima_compra_timestamp is not None:
@@ -159,26 +288,36 @@ class StrategySwingTrade:
         # Calcular queda percentual desde a máxima
         queda_pct = ((self.preco_referencia_maxima - preco_atual) / self.preco_referencia_maxima) * Decimal('100')
 
+        # Log sobre a queda (usando INFO para garantir visibilidade)
+        self.logger.info(
+            f"📉 Giro Rápido | Queda desde máx: {queda_pct:.2f}% | "
+            f"Gatilho: {self.gatilho_compra_pct}% | "
+            f"Atingiu: {'SIM ✓' if queda_pct >= self.gatilho_compra_pct else 'NÃO ✗'}"
+        )
+
         # Verificar se atingiu o gatilho de compra
         if queda_pct >= self.gatilho_compra_pct:
             # Calcular quanto comprar (100% do capital disponível da carteira giro_rapido)
             capital_disponivel = self.gestao_capital.calcular_capital_disponivel('giro_rapido')
 
+            self.logger.debug(f"💰 Giro Rápido | Capital disponível: ${capital_disponivel:.2f}")
+
             if capital_disponivel <= 0:
-                self.logger.debug("📈 Oportunidade de compra detectada, mas sem capital disponível")
+                self.logger.warning("⚠️ Oportunidade de compra detectada, mas SEM CAPITAL disponível!")
+                self.logger.warning(f"   Verifique saldo USDT e configuração de alocação ({self.alocacao_capital_pct}%)")
                 return None
 
             # Verificar valor mínimo de ordem
             valor_minimo = Decimal(str(self.config.get('VALOR_MINIMO_ORDEM', 5.0)))
             if capital_disponivel < valor_minimo:
-                self.logger.debug(f"📈 Capital disponível (${capital_disponivel:.2f}) abaixo do mínimo (${valor_minimo:.2f})")
+                self.logger.warning(f"⚠️ Capital disponível (${capital_disponivel:.2f}) abaixo do mínimo (${valor_minimo:.2f})")
                 return None
 
             # Validar com gestão de capital
             pode_comprar, motivo = self.gestao_capital.pode_comprar(capital_disponivel, 'giro_rapido')
 
             if not pode_comprar:
-                self.logger.debug(f"📈 Compra bloqueada pela gestão de capital: {motivo}")
+                self.logger.warning(f"⚠️ Compra bloqueada pela gestão de capital: {motivo}")
                 if self.notifier:
                     titulo = "Compra Bloqueada (Giro Rápido)"
                     mensagem = (
@@ -312,14 +451,15 @@ class StrategySwingTrade:
         Args:
             oportunidade: Dados da oportunidade que foi executada
         """
-        # Após venda, resetar estado
-        self.preco_referencia_maxima = oportunidade['preco_atual']
+        # Após venda, resetar estado para forçar nova inicialização com histórico
+        self.preco_referencia_maxima = None
+        self._inicializado_com_historico = False
 
         # Resetar cooldown após venda (permitir nova compra imediatamente)
         self.ultima_compra_timestamp = None
 
         self.logger.info(f"💰 Venda executada (Giro Rápido) - Ciclo completo. Lucro: {oportunidade.get('lucro_percentual', 0):.2f}%")
-        self.logger.info(f"✅ Cooldown resetado - nova compra permitida")
+        self.logger.info(f"✅ Cooldown resetado - próxima verificação irá buscar histórico de preços")
 
     def obter_estatisticas(self) -> Dict[str, Any]:
         """

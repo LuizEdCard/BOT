@@ -5,6 +5,7 @@ Bot Worker - Orquestrador de Estratégias de Trading
 
 import sys
 import asyncio
+import math
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -34,7 +35,7 @@ from src.utils.constants import Icones, LogConfig
 class BotWorker:
     """Bot Worker - Orquestrador de Estratégias de Trading"""
 
-    def __init__(self, config: Dict[str, Any], exchange_api: ExchangeAPI, telegram_notifier=None, notifier=None):
+    def __init__(self, config: Dict[str, Any], exchange_api: ExchangeAPI, telegram_notifier=None, notifier=None, modo_simulacao: bool = False):
         """
         Inicializar bot worker
 
@@ -48,11 +49,15 @@ class BotWorker:
         self.exchange_api = exchange_api
         self.telegram_notifier = telegram_notifier
         self.notifier = notifier
+        self.modo_simulacao = modo_simulacao
+
+        # Escolha de estratégia (dca, giro, ou ambas)
+        self.estrategia_ativa = config.get('ESTRATEGIA_ATIVA', 'ambas')
 
         main_logger, self.panel_logger = get_loggers(
             nome=self.config.get('BOT_NAME', 'BotWorker'),
             log_dir=Path('logs'),
-            config=LogConfig.DEFAULT,
+            config=LogConfig.DESENVOLVIMENTO,
             console=True
         )
 
@@ -114,7 +119,8 @@ class BotWorker:
             position_manager=self.position_manager,
             gestao_capital=self.gestao_capital,
             logger=swing_logger,
-            notifier=self.notifier
+            notifier=self.notifier,
+            exchange_api=self.exchange_api  # CRÍTICO: Passar API para buscar histórico
         )
 
         # Estado do bot
@@ -145,16 +151,23 @@ class BotWorker:
         self.estado_bot: str = "OPERANDO"
         self.ja_avisou_sem_saldo: bool = False
         
+        # Log de inicialização com status das estratégias
+        estrategias_config = self.config.get('ESTRATEGIAS', {})
+        dca_habilitada = estrategias_config.get('dca', True)
+        giro_habilitado = estrategias_config.get('giro_rapido', False)
+        
         self.logger.info(f"🤖 BotWorker inicializado com arquitetura de estratégias")
         self.logger.info(f"   📊 PositionManager (acumulação): {'COM POSIÇÃO' if self.position_manager.tem_posicao('acumulacao') else 'SEM POSIÇÃO'}")
-        self.logger.info(f"   🎯 StrategyDCA: {len(self.strategy_dca.degraus_compra)} degraus")
+        self.logger.info(f"   🎯 StrategyDCA: {'HABILITADA' if dca_habilitada else 'DESABILITADA'} ({len(self.strategy_dca.degraus_compra)} degraus)")
         self.logger.info(f"   💰 StrategySell: {len(self.strategy_sell.metas_venda)} metas")
-        self.logger.info(f"   📈 StrategySwingTrade: {'HABILITADA' if self.strategy_swing_trade.habilitado else 'DESABILITADA'}")
+        self.logger.info(f"   📈 StrategySwingTrade: {'HABILITADA' if giro_habilitado else 'DESABILITADA'}")
 
     def _sincronizar_saldos_exchange(self):
         """
         Sincroniza saldos reais da exchange com a gestão de capital.
         Implementa auto-correção do banco de dados se uma divergência for detectada.
+
+        IMPORTANTE: Em modo simulação, não faz auto-correção - confia no saldo inicial fornecido.
         """
         try:
             self.logger.info(f"🔄 Sincronizando saldos com a exchange...")
@@ -187,52 +200,62 @@ class BotWorker:
             self.logger.info(f"📏 Diferença detectada: {diferenca_absoluta:.2f} {base_currency} (tolerância: {tolerancia:.2f})")
 
             # 4. Se divergência for maior que a tolerância, considerar desincronização
+            # IMPORTANTE: Pular auto-correção em modo simulação
             if diferenca_absoluta > tolerancia:
                 self.logger.warning("⚠️" + "="*60)
                 self.logger.warning("⚠️ DIVERGÊNCIA DETECTADA!")
                 self.logger.warning(f"⚠️ Saldo da API ({saldo_base_real:.1f}) difere do banco local ({quantidade_local:.1f})")
                 self.logger.warning(f"⚠️ Diferença de {diferenca_absoluta:.2f} {base_currency} excede a tolerância de {tolerancia:.2f}")
-                self.logger.warning("⚠️ Sincronizando histórico dos últimos 60 dias com a exchange...")
-                self.logger.warning("⚠️ Histórico antigo (> 60 dias) será preservado")
-                self.logger.warning("⚠️" + "="*60)
-                
-                try:
-                    # 4a. Chamar método de importação de histórico
-                    self.logger.info("🔄 Iniciando auto-correção do banco de dados...")
-                    self.exchange_api.importar_historico_para_db(
-                        database_manager=self.db,
-                        par=self.config['par']
-                    )
-                    
-                    # 4b. Recarregar o PositionManager para refletir os dados corretos
-                    self.logger.info("🔄 Recarregando PositionManager com dados corrigidos...")
-                    self.position_manager.carregar_posicao('acumulacao')
-                    self.position_manager.carregar_posicao('giro_rapido')
 
-                    # Verificar novamente após correção (TOTAL de ambas carteiras)
-                    quantidade_acum_corrigida = self.position_manager.get_quantidade_total('acumulacao')
-                    quantidade_giro_corrigida = self.position_manager.get_quantidade_total('giro_rapido')
-                    quantidade_corrigida = quantidade_acum_corrigida + quantidade_giro_corrigida
-                    diferenca_pos_correcao = abs(Decimal(str(saldo_base_real)) - quantidade_corrigida)
-                    
-                    self.logger.info(f"✅ Auto-correção concluída!")
-                    self.logger.info(f"   📊 Saldo LOCAL corrigido: {quantidade_corrigida:.1f} {base_currency}")
-                    self.logger.info(f"   📊 Saldo EXCHANGE: {saldo_base_real:.1f} {base_currency}")
-                    self.logger.info(f"   📏 Nova diferença: {diferenca_pos_correcao:.2f} {base_currency}")
-                    
-                    if diferenca_pos_correcao <= tolerancia:
-                        self.logger.info("✅ Banco de dados sincronizado com sucesso com a exchange!")
-                    else:
-                        self.logger.warning(f"⚠️ Ainda há divergência de {diferenca_pos_correcao:.2f} {base_currency} após correção")
-                        self.logger.warning("⚠️ Não forçando quantidade - verifique manualmente as estratégias no banco")
-                        # NÃO forçar quantidade porque isso pode misturar as carteiras
-                        # O usuário deve verificar manualmente o banco de dados
-                    
-                except Exception as erro_correcao:
-                    self.logger.error(f"❌ Erro durante auto-correção: {erro_correcao}")
-                    self.logger.warning("⚠️ Continuando com dados locais existentes")
-                    import traceback
-                    self.logger.error(f"Traceback:\n{traceback.format_exc()}")
+                # ═══════════════════════════════════════════════════════════════
+                # MODO SIMULAÇÃO: NÃO fazer auto-correção
+                # ═══════════════════════════════════════════════════════════════
+                if self.modo_simulacao:
+                    self.logger.info("🔬 MODO SIMULAÇÃO: Auto-correção desabilitada")
+                    self.logger.info("🔬 Confiando no saldo inicial fornecido para o backtest")
+                else:
+                    # Modo real: aplicar auto-correção
+                    self.logger.warning("⚠️ Sincronizando histórico dos últimos 60 dias com a exchange...")
+                    self.logger.warning("⚠️ Histórico antigo (> 60 dias) será preservado")
+                    self.logger.warning("⚠️" + "="*60)
+
+                    try:
+                        # 4a. Chamar método de importação de histórico
+                        self.logger.info("🔄 Iniciando auto-correção do banco de dados...")
+                        self.exchange_api.importar_historico_para_db(
+                            database_manager=self.db,
+                            par=self.config['par']
+                        )
+
+                        # 4b. Recarregar o PositionManager para refletir os dados corretos
+                        self.logger.info("🔄 Recarregando PositionManager com dados corrigidos...")
+                        self.position_manager.carregar_posicao('acumulacao')
+                        self.position_manager.carregar_posicao('giro_rapido')
+
+                        # Verificar novamente após correção (TOTAL de ambas carteiras)
+                        quantidade_acum_corrigida = self.position_manager.get_quantidade_total('acumulacao')
+                        quantidade_giro_corrigida = self.position_manager.get_quantidade_total('giro_rapido')
+                        quantidade_corrigida = quantidade_acum_corrigida + quantidade_giro_corrigida
+                        diferenca_pos_correcao = abs(Decimal(str(saldo_base_real)) - quantidade_corrigida)
+
+                        self.logger.info(f"✅ Auto-correção concluída!")
+                        self.logger.info(f"   📊 Saldo LOCAL corrigido: {quantidade_corrigida:.1f} {base_currency}")
+                        self.logger.info(f"   📊 Saldo EXCHANGE: {saldo_base_real:.1f} {base_currency}")
+                        self.logger.info(f"   📏 Nova diferença: {diferenca_pos_correcao:.2f} {base_currency}")
+
+                        if diferenca_pos_correcao <= tolerancia:
+                            self.logger.info("✅ Banco de dados sincronizado com sucesso com a exchange!")
+                        else:
+                            self.logger.warning(f"⚠️ Ainda há divergência de {diferenca_pos_correcao:.2f} {base_currency} após correção")
+                            self.logger.warning("⚠️ Não forçando quantidade - verifique manualmente as estratégias no banco")
+                            # NÃO forçar quantidade porque isso pode misturar as carteiras
+                            # O usuário deve verificar manualmente o banco de dados
+
+                    except Exception as erro_correcao:
+                        self.logger.error(f"❌ Erro durante auto-correção: {erro_correcao}")
+                        self.logger.warning("⚠️ Continuando com dados locais existentes")
+                        import traceback
+                        self.logger.error(f"Traceback:\n{traceback.format_exc()}")
             else:
                 self.logger.info(f"✅ Saldo local sincronizado com a exchange (diferença: {diferenca_absoluta:.2f} dentro da tolerância)")
 
@@ -400,11 +423,27 @@ class BotWorker:
                 quantidade=float(quantidade)
             )
 
-            if ordem and ordem.get('status') == 'FILLED':
-                quantidade_real = Decimal(str(ordem.get('executedQty', quantidade)))
-                preco_real = Decimal(str(ordem.get('cummulativeQuoteQty', '0'))) / quantidade_real if quantidade_real > 0 else preco_atual
+            # Para KuCoin, market orders são executadas imediatamente, não retornam status FILLED
+            # Para Binance, verifica o status
+            ordem_executada = False
+            if hasattr(self.exchange_api, '__class__') and 'Binance' in self.exchange_api.__class__.__name__:
+                # Binance: verifica status FILLED
+                ordem_executada = ordem and ordem.get('status') == 'FILLED'
+            else:
+                # KuCoin e outras: market orders são executadas se retornaram orderId
+                ordem_executada = ordem and (ordem.get('orderId') or ordem.get('id'))
+            
+            if ordem_executada:
+                # Binance: usa executedQty e cummulativeQuoteQty
+                if hasattr(self.exchange_api, '__class__') and 'Binance' in self.exchange_api.__class__.__name__:
+                    quantidade_real = Decimal(str(ordem.get('executedQty', quantidade)))
+                    preco_real = Decimal(str(ordem.get('cummulativeQuoteQty', '0'))) / quantidade_real if quantidade_real > 0 else preco_atual
+                else:
+                    # KuCoin: market orders usam a quantidade solicitada
+                    quantidade_real = Decimal(str(quantidade))
+                    preco_real = preco_atual
 
-                self.logger.operacao_compra(
+                self.main_logger.operacao_compra(
                     par=self.config['par'],
                     quantidade=float(quantidade_real),
                     preco=float(preco_real),
@@ -476,19 +515,98 @@ class BotWorker:
             quantidade = oportunidade['quantidade_venda']
             preco_atual = oportunidade['preco_atual']
             carteira = oportunidade.get('carteira', 'acumulacao')  # Padrão: acumulacao
-            
+
             self.logger.info(f"💰 Executando oportunidade de venda: {oportunidade['motivo']}")
-            
+
+            # ═══════════════════════════════════════════════════════════════════
+            # VERIFICAÇÃO DE SALDO REAL ANTES DE VENDER
+            # ═══════════════════════════════════════════════════════════════════
+            # Previne vendas duplicadas e tentativas de vender mais do que se tem
+            base_currency = self.config['par'].split('/')[0]
+            saldo_real_exchange = Decimal(str(self.exchange_api.get_saldo_disponivel(base_currency)))
+            saldo_carteira_db = self.position_manager.get_quantidade_total(carteira)
+
+            self.logger.info(f"🔍 Verificação de saldo antes da venda [{carteira}]:")
+            self.logger.info(f"   • Saldo REAL na exchange: {saldo_real_exchange:.4f} {base_currency}")
+            self.logger.info(f"   • Saldo carteira {carteira} (DB): {saldo_carteira_db:.4f} {base_currency}")
+            self.logger.info(f"   • Quantidade a vender: {quantidade:.4f} {base_currency}")
+
+            # Verificar se há saldo suficiente na exchange
+            # Usar math.isclose para comparar floats com tolerância
+            if saldo_real_exchange < quantidade and not math.isclose(saldo_real_exchange, quantidade):
+                self.logger.error(f"❌ VENDA BLOQUEADA: Saldo insuficiente!")
+                self.logger.error(f"   • Tentativa de vender: {quantidade:.4f} {base_currency}")
+                self.logger.error(f"   • Saldo disponível: {saldo_real_exchange:.4f} {base_currency}")
+                self.logger.error(f"   • Faltam: {(quantidade - saldo_real_exchange):.4f} {base_currency}")
+
+                # Alerta crítico via notifier
+                if self.notifier:
+                    carteira_nome = "Acumulação" if carteira == 'acumulacao' else "Giro Rápido"
+                    self.notifier.enviar_alerta(
+                        f"VENDA BLOQUEADA - Saldo Insuficiente [{carteira_nome}]",
+                        f"Tentou vender {quantidade:.4f} {base_currency}\n"
+                        f"Saldo disponível: {saldo_real_exchange:.4f} {base_currency}\n"
+                        f"Verifique sincronização do banco!"
+                    )
+
+                return False
+
+            # Verificar se a carteira especificada realmente tem essa posição
+            if saldo_carteira_db < quantidade:
+                self.logger.warning(f"⚠️ ATENÇÃO: Carteira {carteira} no DB tem menos que o solicitado!")
+                self.logger.warning(f"   • Carteira {carteira} DB: {saldo_carteira_db:.4f} {base_currency}")
+                self.logger.warning(f"   • Quantidade a vender: {quantidade:.4f} {base_currency}")
+                self.logger.warning(f"   • Possível interferência entre carteiras ou dessincronia!")
+
+                # Verificar se há interferência: outra carteira tentando vender da posição errada
+                outra_carteira = 'acumulacao' if carteira == 'giro_rapido' else 'giro_rapido'
+                saldo_outra_carteira = self.position_manager.get_quantidade_total(outra_carteira)
+
+                if saldo_outra_carteira >= quantidade:
+                    self.logger.error(f"❌ VENDA BLOQUEADA: Interferência detectada!")
+                    self.logger.error(f"   • Carteira {carteira} tem apenas: {saldo_carteira_db:.4f} {base_currency}")
+                    self.logger.error(f"   • Mas carteira {outra_carteira} tem: {saldo_outra_carteira:.4f} {base_currency}")
+                    self.logger.error(f"   • Estratégia {carteira} NÃO PODE vender de {outra_carteira}!")
+
+                    if self.notifier:
+                        self.notifier.enviar_alerta(
+                            f"VENDA BLOQUEADA - Interferência Entre Carteiras",
+                            f"Carteira {carteira} tentou vender {quantidade:.4f} {base_currency}\n"
+                            f"Mas só tem {saldo_carteira_db:.4f} no DB!\n"
+                            f"Possível contaminação com carteira {outra_carteira}"
+                        )
+
+                    return False
+
+            self.logger.info(f"✅ Verificação de saldo OK - Prosseguindo com venda")
+
             # Executar ordem na exchange
             ordem = self.exchange_api.place_ordem_venda_market(
                 par=self.config['par'],
                 quantidade=float(quantidade)
             )
 
-            if ordem and ordem.get('status') == 'FILLED':
-                quantidade_real = Decimal(str(ordem.get('executedQty', quantidade)))
-                valor_real = Decimal(str(ordem.get('cummulativeQuoteQty', '0')))
-                preco_real = valor_real / quantidade_real if quantidade_real > 0 else preco_atual
+            # Para KuCoin, market orders são executadas imediatamente, não retornam status FILLED
+            # Para Binance, verifica o status
+            ordem_executada = False
+            if hasattr(self.exchange_api, '__class__') and 'Binance' in self.exchange_api.__class__.__name__:
+                # Binance: verifica status FILLED
+                ordem_executada = ordem and ordem.get('status') == 'FILLED'
+            else:
+                # KuCoin e outras: market orders são executadas se retornaram orderId
+                ordem_executada = ordem and (ordem.get('orderId') or ordem.get('id'))
+            
+            if ordem_executada:
+                # Binance: usa executedQty e cummulativeQuoteQty
+                if hasattr(self.exchange_api, '__class__') and 'Binance' in self.exchange_api.__class__.__name__:
+                    quantidade_real = Decimal(str(ordem.get('executedQty', quantidade)))
+                    valor_real = Decimal(str(ordem.get('cummulativeQuoteQty', '0')))
+                    preco_real = valor_real / quantidade_real if quantidade_real > 0 else preco_atual
+                else:
+                    # KuCoin: market orders usam a quantidade solicitada
+                    quantidade_real = Decimal(str(quantidade))
+                    valor_real = quantidade_real * preco_atual
+                    preco_real = preco_atual
 
                 # Calcular lucro ANTES de atualizar PositionManager
                 # IMPORTANTE: Usar PM da carteira que está vendendo
@@ -500,7 +618,7 @@ class BotWorker:
                     lucro_pct = ((preco_real - preco_medio) / preco_medio) * Decimal('100')
                     lucro_usdt = (preco_real - preco_medio) * quantidade_real
 
-                self.logger.operacao_venda(
+                self.main_logger.operacao_venda(
                     par=self.config['par'],
                     quantidade=float(quantidade_real),
                     preco=float(preco_real),
@@ -582,12 +700,29 @@ class BotWorker:
                 quantidade=float(quantidade)
             )
 
-            if ordem and ordem.get('status') == 'FILLED':
-                quantidade_real = Decimal(str(ordem.get('executedQty', quantidade)))
-                valor_real = Decimal(str(ordem.get('cummulativeQuoteQty', '0')))
-                preco_real = valor_real / quantidade_real if quantidade_real > 0 else preco_atual
+            # Para KuCoin, market orders são executadas imediatamente, não retornam status FILLED
+            # Para Binance, verifica o status
+            ordem_executada = False
+            if hasattr(self.exchange_api, '__class__') and 'Binance' in self.exchange_api.__class__.__name__:
+                # Binance: verifica status FILLED
+                ordem_executada = ordem and ordem.get('status') == 'FILLED'
+            else:
+                # KuCoin e outras: market orders são executadas se retornaram orderId
+                ordem_executada = ordem and (ordem.get('orderId') or ordem.get('id'))
+            
+            if ordem_executada:
+                # Binance: usa executedQty e cummulativeQuoteQty
+                if hasattr(self.exchange_api, '__class__') and 'Binance' in self.exchange_api.__class__.__name__:
+                    quantidade_real = Decimal(str(ordem.get('executedQty', quantidade)))
+                    valor_real = Decimal(str(ordem.get('cummulativeQuoteQty', '0')))
+                    preco_real = valor_real / quantidade_real if quantidade_real > 0 else preco_atual
+                else:
+                    # KuCoin: market orders usam a quantidade solicitada
+                    quantidade_real = Decimal(str(quantidade))
+                    valor_real = quantidade_real * preco_atual
+                    preco_real = preco_atual
 
-                self.logger.operacao_compra(
+                self.main_logger.operacao_compra(
                     par=self.config['par'],
                     quantidade=float(quantidade_real),
                     preco=float(preco_real),
@@ -710,116 +845,194 @@ class BotWorker:
             contador_ciclos = 0
 
             # ═══════════════════════════════════════
-            # LOOP PRINCIPAL SIMPLIFICADO
+            # SELEÇÃO DO MODO DE OPERAÇÃO
             # ═══════════════════════════════════════
-            while self.rodando:
-                try:
-                    # Processar comandos remotos
-                    self._processar_comandos()
-                    
-                    contador_ciclos += 1
-
-                    # 1. Obter preço atual
-                    preco_atual = Decimal(str(self.exchange_api.get_preco_atual(self.config['par'])))
-                    
-                    # Calcular distância da SMA
-                    distancia_sma = self._calcular_distancia_sma(preco_atual)
-
-                    if contador_ciclos == 1:
-                        base_currency = self.config['par'].split('/')[0]
-                        self.logger.info(f"📊 Preço inicial {base_currency}: ${preco_atual:.6f}")
-                        if distancia_sma:
-                            self.logger.info(f"📉 Distância da SMA: {distancia_sma:.2f}%")
-
-                    # 2. Verificar oportunidade de compra (DCA) - Carteira Acumulação
-                    if distancia_sma:
-                        oportunidade_compra = self.strategy_dca.verificar_oportunidade(
-                            preco_atual=preco_atual,
-                            distancia_sma=distancia_sma
-                        )
-
-                        if oportunidade_compra:
-                            if self._executar_oportunidade_compra(oportunidade_compra):
-                                self.logger.info("✅ Compra executada com sucesso (Acumulação)!")
-                                time.sleep(10)  # Pausa após compra
-                                continue
-
-                    # 2b. Verificar oportunidade de Swing Trade (Giro Rápido)
-                    if self.strategy_swing_trade.habilitado:
-                        oportunidade_swing = self.strategy_swing_trade.verificar_oportunidade(preco_atual)
-
-                        if oportunidade_swing:
-                            if oportunidade_swing['tipo'] == 'compra':
-                                if self._executar_oportunidade_compra(oportunidade_swing):
-                                    self.logger.info("✅ Compra executada com sucesso (Giro Rápido)!")
-                                    time.sleep(10)
-                                    continue
-                            elif oportunidade_swing['tipo'] == 'venda':
-                                if self._executar_oportunidade_venda(oportunidade_swing):
-                                    self.logger.info("✅ Venda executada com sucesso (Giro Rápido)!")
-                                    time.sleep(10)
-                                    continue
-
-                    # 3. Verificar oportunidade de venda - Carteira Acumulação
-                    oportunidade_venda = self.strategy_sell.verificar_oportunidade(preco_atual)
-
-                    if oportunidade_venda:
-                        if self._executar_oportunidade_venda(oportunidade_venda):
-                            self.logger.info("✅ Venda executada com sucesso (Acumulação)!")
-                            time.sleep(10)  # Pausa após venda
-                            continue
-
-                    # 4. Verificar recompras de segurança - Carteira Acumulação
-                    oportunidade_recompra = self.strategy_sell.verificar_recompra_de_seguranca(preco_atual)
-
-                    if oportunidade_recompra:
-                        if self._executar_oportunidade_recompra(oportunidade_recompra):
-                            self.logger.info("✅ Recompra executada com sucesso!")
-                            time.sleep(10)  # Pausa após recompra
-                            continue
-
-                    # 5. Tarefas periódicas
-                    if self.intervalo_verificacao_aportes is not None:
-                        self._verificar_aportes_brl()
-                    self._fazer_backup_periodico()
-
-                    # Log informativo a cada 20 ciclos
-                    if contador_ciclos % 20 == 0:
-                        posicao = self.position_manager.get_quantidade_total()
-                        preco_medio = self.position_manager.get_preco_medio()
-
-                        if posicao > 0 and preco_medio:
-                            lucro_atual = self.position_manager.calcular_lucro_atual(preco_atual)
-                            base_currency = self.config['par'].split('/')[0]
-                            self.logger.info(
-                                f"📊 Status: {posicao:.1f} {base_currency} | "
-                                f"PM: ${preco_medio:.6f} | "
-                                f"Lucro: {lucro_atual:+.2f}%" if lucro_atual else "📊 Sem posição ativa"
-                            )
-
-                    # Pausa entre ciclos
-                    time.sleep(5)
-
-                except KeyboardInterrupt:
-                    self.logger.info("🛑 Interrupção solicitada pelo usuário")
-                    self.rodando = False
-                    continue
-                except Exception as e:
-                    self.logger.error(f'Erro inesperado no loop principal: {e}', exc_info=True)
-                    self.estado_bot = 'ERRO'
-                    time.sleep(60)
-                    continue
-
+            if self.modo_simulacao:
+                self._run_simulacao()
+            else:
+                self._run_tempo_real()
+        
         except Exception as e:
-            self.logger.error(f"❌ Erro crítico no bot: {e}")
-            if self.notifier:
-                self.notifier.enviar_alerta(
-                    f"ERRO CRÍTICO - {self.config.get('nome_instancia', 'Bot')}",
-                    str(e)
-                )
-        finally:
+            self.logger.error(f"❌ Erro fatal no bot: {e}", exc_info=True)
+            raise
+
+    def _run_simulacao(self):
+        """
+        Loop de execução para o modo de simulação (backtesting).
+
+        REFATORADO: Itera explicitamente pelos dados históricos usando indice_atual
+        para garantir que todos os candles sejam processados.
+        """
+        self.logger.info("🏁 Iniciando worker em MODO DE SIMULAÇÃO.")
+
+        # Verificar se a API tem o atributo indice_atual e dados_completos
+        if not hasattr(self.exchange_api, 'indice_atual') or not hasattr(self.exchange_api, 'dados_completos'):
+            self.logger.error("❌ SimulatedExchangeAPI não possui atributos necessários (indice_atual/dados_completos)")
             self.rodando = False
-            self.main_logger.banner("🛑 BOT FINALIZADO")
+            return
+
+        total_candles = len(self.exchange_api.dados_completos)
+        self.logger.info(f"📊 Total de candles para processar: {total_candles}")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # LOOP PRINCIPAL: Iterar enquanto há dados históricos
+        # ═══════════════════════════════════════════════════════════════════
+        while self.rodando and self.exchange_api.indice_atual < total_candles:
+            try:
+                # Executar ciclo de decisão (que internamente chama get_preco_atual e avança o índice)
+                self._executar_ciclo_decisao()
+
+                # Log de progresso a cada 100 candles
+                if self.exchange_api.indice_atual % 100 == 0:
+                    progresso = (self.exchange_api.indice_atual / total_candles) * 100
+                    self.logger.info(f"📊 Progresso: {self.exchange_api.indice_atual}/{total_candles} ({progresso:.1f}%)")
+
+            except StopIteration:
+                # StopIteration é lançado quando get_preco_atual não tem mais dados
+                self.logger.info("🏁 Fim dos dados históricos (StopIteration).")
+                self.rodando = False
+                break
+
+            except KeyboardInterrupt:
+                self.logger.info("🛑 Interrupção solicitada pelo usuário durante a simulação.")
+                self.rodando = False
+                break
+
+            except Exception as e:
+                self.logger.error(f'❌ Erro inesperado no loop de simulação: {e}', exc_info=True)
+                import traceback
+                self.logger.error(f"Traceback:\n{traceback.format_exc()}")
+                self.rodando = False
+                break
+
+        # ═══════════════════════════════════════════════════════════════════
+        # FINALIZAÇÃO: Logar resultados
+        # ═══════════════════════════════════════════════════════════════════
+        self.logger.info(f"🏁 Simulação finalizada. Candles processados: {self.exchange_api.indice_atual}/{total_candles}")
+
+        if hasattr(self.exchange_api, 'get_resultados'):
+            self._logar_resultados_simulacao()
+
+    def _run_tempo_real(self):
+        """Loop de execução para o modo de operação em tempo real."""
+        self.logger.info("🟢 Iniciando worker em MODO DE TEMPO REAL.")
+        
+        while self.rodando:
+            try:
+                self._executar_ciclo_decisao()
+                
+                # Pausa entre os ciclos no modo de tempo real
+                time.sleep(5)
+
+            except KeyboardInterrupt:
+                self.logger.info("🛑 Interrupção solicitada pelo usuário.")
+                self.rodando = False
+                continue
+            except Exception as e:
+                self.logger.error(f'Erro inesperado no loop principal: {e}', exc_info=True)
+                self.estado_bot = 'ERRO'
+                time.sleep(60)  # Pausa maior em caso de erro
+                continue
+
+    def _executar_ciclo_decisao(self):
+        """
+        Contém a lógica de decisão principal do bot, chamada em cada ciclo
+        seja em tempo real ou em simulação.
+        """
+        # Processar comandos remotos (relevante em ambos os modos)
+        self._processar_comandos()
+        
+        # 1. Obter preço atual
+        preco_atual = Decimal(str(self.exchange_api.get_preco_atual(self.config['par'])))
+        
+        # Calcular distância da SMA
+        distancia_sma = self._calcular_distancia_sma(preco_atual)
+
+        # 2. Verificar oportunidade de compra (DCA) - Carteira Acumulação
+        if distancia_sma:
+            oportunidade_compra = self.strategy_dca.verificar_oportunidade(
+                preco_atual=preco_atual,
+                distancia_sma=distancia_sma
+            )
+            if oportunidade_compra and self._executar_oportunidade_compra(oportunidade_compra):
+                self.logger.info("✅ Compra executada com sucesso (Acumulação)!")
+                if not self.modo_simulacao: time.sleep(10)
+                return
+
+        # 2b. Verificar oportunidade de Swing Trade (Giro Rápido)
+        if self.strategy_swing_trade.habilitado:
+            oportunidade_swing = self.strategy_swing_trade.verificar_oportunidade(preco_atual)
+            if oportunidade_swing:
+                if oportunidade_swing['tipo'] == 'compra':
+                    if self._executar_oportunidade_compra(oportunidade_swing):
+                        self.logger.info("✅ Compra executada com sucesso (Giro Rápido)!")
+                        if not self.modo_simulacao: time.sleep(10)
+                        return
+                elif oportunidade_swing['tipo'] == 'venda':
+                    if self._executar_oportunidade_venda(oportunidade_swing):
+                        self.logger.info("✅ Venda executada com sucesso (Giro Rápido)!")
+                        if not self.modo_simulacao: time.sleep(10)
+                        return
+
+        # 3. Verificar oportunidade de venda - Carteira Acumulação
+        oportunidade_venda = self.strategy_sell.verificar_oportunidade(preco_atual)
+        if oportunidade_venda and self._executar_oportunidade_venda(oportunidade_venda):
+            self.logger.info("✅ Venda executada com sucesso (Acumulação)!")
+            if not self.modo_simulacao: time.sleep(10)
+            return
+
+        # 4. Verificar recompras de segurança - Carteira Acumulação
+        oportunidade_recompra = self.strategy_sell.verificar_recompra_de_seguranca(preco_atual)
+        if oportunidade_recompra and self._executar_oportunidade_recompra(oportunidade_recompra):
+            self.logger.info("✅ Recompra executada com sucesso!")
+            if not self.modo_simulacao: time.sleep(10)
+            return
+
+        # 5. Tarefas periódicas (só executam em tempo real)
+        if not self.modo_simulacao:
+            if self.intervalo_verificacao_aportes is not None:
+                self._verificar_aportes_brl()
+            self._fazer_backup_periodico()
+
+    def _logar_resultados_simulacao(self):
+        """Imprime um resumo dos resultados do backtest."""
+        self.logger.info("📊" + "="*60)
+        self.logger.info("📊 RESULTADOS DA SIMULAÇÃO")
+        self.logger.info("📊" + "="*60)
+
+        resultados = self.exchange_api.get_resultados()
+        trades = resultados.get('trades', [])
+        portfolio_history = resultados.get('portfolio_over_time', [])
+
+        if not portfolio_history:
+            self.logger.warning("⚠️ Nenhum histórico de portfólio para analisar.")
+            return
+
+        # Análise do Portfólio
+        valor_inicial = portfolio_history[0]['total_value_quote']
+        valor_final = portfolio_history[-1]['total_value_quote']
+        retorno_total = valor_final - valor_inicial
+        retorno_percentual = (retorno_total / valor_inicial) * 100 if valor_inicial > 0 else 0
+
+        self.logger.info(f"Valor Inicial do Portfólio: ${valor_inicial:.2f}")
+        self.logger.info(f"Valor Final do Portfólio:   ${valor_final:.2f}")
+        self.logger.info(f"Retorno Total:              ${retorno_total:.2f} ({retorno_percentual:.2f}%)")
+
+        # Análise de Trades
+        if trades:
+            total_trades = len(trades)
+            compras = [t for t in trades if t['side'] == 'BUY']
+            vendas = [t for t in trades if t['side'] == 'SELL']
+            total_taxas = sum(t['fee'] for t in trades)
+
+            self.logger.info(f"Total de Trades Executados: {total_trades}")
+            self.logger.info(f"  - Compras: {len(compras)}")
+            self.logger.info(f"  - Vendas: {len(vendas)}")
+            self.logger.info(f"Total de Taxas Pagas:       ${total_taxas:.4f}")
+        else:
+            self.logger.info("Nenhum trade foi executado durante a simulação.")
+
+        self.logger.info("="*62)
 
     def get_status_dict(self) -> Dict[str, Any]:
         """
@@ -915,6 +1128,11 @@ class BotWorker:
 
             uptime = datetime.now() - self.inicio_bot
 
+            # Obter referência máxima do Giro Rápido (se disponível)
+            referencia_maxima_giro = None
+            if self.strategy_swing_trade.habilitado and self.strategy_swing_trade.preco_referencia_maxima:
+                referencia_maxima_giro = self.strategy_swing_trade.preco_referencia_maxima
+
             return {
                 'nome_instancia': self.config.get('nome_instancia', self.config.get('BOT_NAME')),
                 'par': self.config['par'],
@@ -927,10 +1145,18 @@ class BotWorker:
                 'distancia_sma': self._calcular_distancia_sma(preco_atual),
                 'rodando_desde': self.inicio_bot.strftime('%Y-%m-%d %H:%M:%S'),
                 'uptime': str(uptime).split('.')[0],
+                # Últimas ordens globais (mantido para compatibilidade)
                 'ultima_compra': self.db.obter_ultima_ordem('COMPRA'),
                 'ultima_venda': self.db.obter_ultima_ordem('VENDA'),
+                # Últimas ordens POR ESTRATÉGIA
+                'ultima_compra_acumulacao': self.db.obter_ultima_ordem_por_estrategia('COMPRA', 'acumulacao'),
+                'ultima_venda_acumulacao': self.db.obter_ultima_ordem_por_estrategia('VENDA', 'acumulacao'),
+                'ultima_compra_giro_rapido': self.db.obter_ultima_ordem_por_estrategia('COMPRA', 'giro_rapido'),
+                'ultima_venda_giro_rapido': self.db.obter_ultima_ordem_por_estrategia('VENDA', 'giro_rapido'),
                 'saldo_disponivel_usdt': saldo_disponivel_usdt,
                 'ativo_base': base_currency,
+                # Referência máxima do Giro Rápido
+                'referencia_maxima_giro': referencia_maxima_giro,
                 # Novos campos para relatório horário
                 'compras_24h': estatisticas_24h['compras'],
                 'vendas_24h': estatisticas_24h['vendas'],

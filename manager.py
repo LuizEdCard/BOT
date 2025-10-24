@@ -25,6 +25,22 @@ load_dotenv('configs/.env')
 # Pega as instâncias dos loggers
 logger, panel_logger = get_loggers()
 
+def formatar_data(timestamp_iso: str) -> str:
+    """
+    Converte timestamp ISO para formato DD/MM/AA - HH:MM
+
+    Args:
+        timestamp_iso: Timestamp no formato ISO (ex: '2025-10-21T13:15:09.205000')
+
+    Returns:
+        String formatada (ex: '21/10/25 - 13:15')
+    """
+    try:
+        dt = datetime.fromisoformat(timestamp_iso)
+        return dt.strftime('%d/%m/%y - %H:%M')
+    except:
+        return timestamp_iso  # Fallback se não conseguir parsear
+
 def carregar_config_bot(nome_arquivo_bot):
     """Função auxiliar para carregar um arquivo de configuração JSON."""
     try:
@@ -49,6 +65,45 @@ def mesclar_configuracoes(config_bot, config_estrategia):
             config_mesclada[upper_key] = value
 
     return config_mesclada
+
+# --- NOVO: normalizar e validar flags de estratégias por instância ---
+def normalizar_estrategias(config: dict) -> dict:
+    """
+    Garante que config['ESTRATEGIAS'] exista no formato:
+      { 'dca': bool, 'giro_rapido': bool }
+    Aceita também lista de nomes de estratégias para habilitar (ex: ["dca"]).
+    """
+    padrao = {'dca': True, 'giro_rapido': True}
+
+    estr = config.get('ESTRATEGIAS', None)
+
+    if estr is None:
+        config['ESTRATEGIAS'] = padrao
+        return config
+
+    # Suporta lista -> ativa apenas os nomes listados
+    if isinstance(estr, list):
+        enabled = {'dca': False, 'giro_rapido': False}
+        for nome in estr:
+            chave = str(nome).lower()
+            if chave in enabled:
+                enabled[chave] = True
+        config['ESTRATEGIAS'] = enabled
+        return config
+
+    # Suporta dict -> coerção booleana e preenchimento de valores faltantes
+    if isinstance(estr, dict):
+        norm = {}
+        for chave in ['dca', 'giro_rapido']:
+            val = estr.get(chave, estr.get(chave.upper(), True))
+            norm[chave] = bool(val)
+        config['ESTRATEGIAS'] = norm
+        return config
+
+    # Fallback para padrão
+    config['ESTRATEGIAS'] = padrao
+    return config
+# --- FIM NOVO ---
 
 def gerar_relatorio_detalhado(bot_workers, inicio_gerente):
     """
@@ -262,8 +317,12 @@ def main():
             continue
         
         config_instancia = mesclar_configuracoes(config_instancia, config_estrategia)
-        logger.info("✅ Configurações de bot e estratégia mescladas")
-        
+        # Normalizar e registrar quais estratégias estarão ativas
+        config_instancia = normalizar_estrategias(config_instancia)
+        habilitadas = config_instancia.get('ESTRATEGIAS', {})
+        logger.info(f"✅ Configurações de bot e estratégia mescladas")
+        logger.info(f"   → Estratégias habilitadas: DCA={'ON' if habilitadas.get('dca') else 'OFF'} | GIRO_RÁPIDO={'ON' if habilitadas.get('giro_rapido') else 'OFF'}")
+
         if 'GESTAO_DE_RISCO' in config_instancia:
             logger.info(f"🔍 GESTAO_DE_RISCO presente com chaves: {list(config_instancia['GESTAO_DE_RISCO'].keys())}")
         if 'DEGRAUS_COMPRA' in config_instancia:
@@ -363,9 +422,9 @@ def main():
 
     try:
         while not shutdown_flag['shutdown']:
-            panel_logger.info("\n" + 
-"╔══════════════════════════════════════════════════════════════════════════════╗\n" + 
-"║                                PAINEL DE STATUS CONSOLIDADO                                \n" + 
+            panel_logger.info("\n" +
+"╔══════════════════════════════════════════════════════════════════════════════╗\n" +
+"║                                PAINEL DE STATUS CONSOLIDADO                                \n" +
 "╚══════════════════════════════════════════════════════════════════════════════╝")
             total_capital_global = Decimal('0')
             total_lucro_usdt_global = Decimal('0')
@@ -377,7 +436,7 @@ def main():
                 except Exception as e:
                     logger.warning(f'Falha ao obter status do bot {worker.config.get("nome_instancia", "Desconhecido")}: {e}')
                     status = {
-                        'nome_instancia': worker.config.get("nome_instancia", "Desconhecido"), 
+                        'nome_instancia': worker.config.get("nome_instancia", "Desconhecido"),
                         'par': worker.config.get("par", "N/A"),
                         'estado_bot': 'ERRO DE COMUNICAÇÃO',
                         'error': str(e)
@@ -406,7 +465,7 @@ def main():
                 total_capital_global += valor_posicao_total + saldo_usdt_disponivel
                 total_lucro_usdt_global += posicao_acumulacao.get('lucro_usdt', Decimal('0')) + posicao_giro_rapido.get('lucro_usdt', Decimal('0'))
 
-                # Imprimir informações do bot
+                # Imprimir informações gerais do bot
                 panel_logger.info(f"║ 🤖 Bot: {status['nome_instancia']} ({par}) | 🕒 Uptime: {status['uptime']}")
                 panel_logger.info(f"║    🧠 Estado: {status['estado_bot']}")
                 panel_logger.info(f"║    💰 Saldo {quote_currency}: ${saldo_usdt_disponivel:.2f}")
@@ -415,41 +474,98 @@ def main():
                 sma_ref_str = f"${status.get('sma_referencia', 0):.6f}" if status.get('sma_referencia') is not None else "N/A"
                 dist_sma_str = f"{status.get('distancia_sma', 0):.2f}%" if status.get('distancia_sma') is not None else "N/A"
                 panel_logger.info(f"║    📈 Preço {ativo_base}: {preco_atual_str} | SMA Ref: {sma_ref_str} | Dist SMA: {dist_sma_str}")
+                panel_logger.info(f"║")
 
                 # ═══════════════════════════════════════
-                # CARTEIRA ACUMULAÇÃO
+                # SEÇÃO ACUMULAÇÃO (BORDADA)
                 # ═══════════════════════════════════════
+                panel_logger.info(f"║    ╔═══════════════════════════════════════════════════════════════════════╗")
+                panel_logger.info(f"║    ║ 📊 ESTRATÉGIA: ACUMULAÇÃO                                             ║")
+                panel_logger.info(f"║    ╟───────────────────────────────────────────────────────────────────────╢")
+
+                # Posição Acumulação
                 pm_acum_str = f"${posicao_acumulacao.get('preco_medio', 0):.6f}" if posicao_acumulacao.get('preco_medio') else "N/A"
                 lp_perc_acum = posicao_acumulacao.get('lucro_percentual', 0)
                 lp_perc_acum_str = f"{lp_perc_acum:.2f}%" if lp_perc_acum is not None else "N/A"
                 lp_usdt_acum = posicao_acumulacao.get('lucro_usdt', 0)
+                qtd_acum = posicao_acumulacao.get('quantidade', 0)
 
-                panel_logger.info(f"║    📊 ACUMULAÇÃO: {posicao_acumulacao.get('quantidade', 0):.2f} {ativo_base} | PM: {pm_acum_str} | Total: ${valor_posicao_acumulacao:.2f}")
-                panel_logger.info(f"║       💹 L/P: {lp_perc_acum_str} (${lp_usdt_acum:.2f})")
+                if qtd_acum > 0:
+                    panel_logger.info(f"║    ║ Posição: {qtd_acum:.2f} {ativo_base} @ {pm_acum_str}                               ║")
+                    panel_logger.info(f"║    ║ Valor Total: ${valor_posicao_acumulacao:.2f} | L/P: {lp_perc_acum_str} (${lp_usdt_acum:.2f})              ║")
+                else:
+                    panel_logger.info(f"║    ║ Status: SEM POSIÇÃO                                                   ║")
+
+                # Última compra da estratégia Acumulação
+                ultima_compra_acum = status.get('ultima_compra_acumulacao')
+                if ultima_compra_acum:
+                    data_formatada = formatar_data(ultima_compra_acum.get('timestamp', 'N/A'))
+                    panel_logger.info(f"║    ║ 🟢 Última Compra: {ultima_compra_acum.get('quantidade', 0):.2f} {ativo_base} @ ${ultima_compra_acum.get('preco', 0):.6f}         ║")
+                    panel_logger.info(f"║    ║    em {data_formatada}                                                ║")
+                else:
+                    panel_logger.info(f"║    ║ 🟢 Última Compra: Nenhuma                                             ║")
+
+                # Última venda da estratégia Acumulação
+                ultima_venda_acum = status.get('ultima_venda_acumulacao')
+                if ultima_venda_acum:
+                    data_formatada = formatar_data(ultima_venda_acum.get('timestamp', 'N/A'))
+                    lucro_venda_str = f"${ultima_venda_acum.get('lucro_usdt', 0):.2f}" if ultima_venda_acum.get('lucro_usdt') is not None else "N/A"
+                    panel_logger.info(f"║    ║ 🔴 Última Venda: {ultima_venda_acum.get('quantidade', 0):.2f} {ativo_base} @ ${ultima_venda_acum.get('preco', 0):.6f}          ║")
+                    panel_logger.info(f"║    ║    em {data_formatada} (Lucro: {lucro_venda_str})                     ║")
+                else:
+                    panel_logger.info(f"║    ║ 🔴 Última Venda: Nenhuma                                              ║")
+
+                panel_logger.info(f"║    ╚═══════════════════════════════════════════════════════════════════════╝")
+                panel_logger.info(f"║")
 
                 # ═══════════════════════════════════════
-                # CARTEIRA GIRO RÁPIDO
+                # SEÇÃO GIRO RÁPIDO (BORDADA)
                 # ═══════════════════════════════════════
-                if posicao_giro_rapido.get('quantidade', 0) > 0:
+                panel_logger.info(f"║    ╔═══════════════════════════════════════════════════════════════════════╗")
+                panel_logger.info(f"║    ║ 🎯 ESTRATÉGIA: GIRO RÁPIDO                                            ║")
+                panel_logger.info(f"║    ╟───────────────────────────────────────────────────────────────────────╢")
+
+                # Posição Giro Rápido
+                qtd_giro = posicao_giro_rapido.get('quantidade', 0)
+                if qtd_giro > 0:
                     pm_giro_str = f"${posicao_giro_rapido.get('preco_medio', 0):.6f}" if posicao_giro_rapido.get('preco_medio') else "N/A"
                     lp_perc_giro = posicao_giro_rapido.get('lucro_percentual', 0)
                     lp_perc_giro_str = f"{lp_perc_giro:.2f}%" if lp_perc_giro is not None else "N/A"
                     lp_usdt_giro = posicao_giro_rapido.get('lucro_usdt', 0)
                     hwm_giro = posicao_giro_rapido.get('high_water_mark', 0)
 
-                    panel_logger.info(f"║    🎯 GIRO RÁPIDO: {posicao_giro_rapido.get('quantidade', 0):.2f} {ativo_base} | PM: {pm_giro_str} | Total: ${valor_posicao_giro:.2f}")
-                    panel_logger.info(f"║       💹 L/P: {lp_perc_giro_str} (${lp_usdt_giro:.2f}) | HWM: {hwm_giro:.2f}%")
+                    panel_logger.info(f"║    ║ Posição: {qtd_giro:.2f} {ativo_base} @ {pm_giro_str}                                ║")
+                    panel_logger.info(f"║    ║ Valor Total: ${valor_posicao_giro:.2f} | L/P: {lp_perc_giro_str} (${lp_usdt_giro:.2f})               ║")
+                    panel_logger.info(f"║    ║ High Water Mark: {hwm_giro:.2f}%                                             ║")
                 else:
-                    panel_logger.info(f"║    🎯 GIRO RÁPIDO: SEM POSIÇÃO")
+                    panel_logger.info(f"║    ║ Status: SEM POSIÇÃO                                                   ║")
+                    # Mostrar referência máxima quando sem posição
+                    ref_max_giro = status.get('referencia_maxima_giro')
+                    if ref_max_giro:
+                        panel_logger.info(f"║    ║ Ref. Máxima (24h): ${ref_max_giro:.6f}                                       ║")
+                        panel_logger.info(f"║    ║ Gatilho Compra: Queda de 2.00% da Ref. Máxima                        ║")
 
-                if status.get('ultima_compra'):
-                    compra = status['ultima_compra']
-                    panel_logger.info(f"║    🟢 Última Compra: {compra.get('quantidade', 0):.2f} {ativo_base} @ ${compra.get('preco', 0):.6f} em {compra.get('timestamp', 'N/A')}")
-                if status.get('ultima_venda'):
-                    venda = status['ultima_venda']
-                    lucro_venda_str = f"${venda.get('lucro_usdt', 0):.2f}" if venda.get('lucro_usdt') is not None else "N/A"
-                    panel_logger.info(f"║    🔴 Última Venda: {venda.get('quantidade', 0):.2f} {ativo_base} @ ${venda.get('preco', 0):.6f} em {venda.get('timestamp', 'N/A')} (Lucro: {lucro_venda_str})")
-                
+                # Última compra da estratégia Giro Rápido
+                ultima_compra_giro = status.get('ultima_compra_giro_rapido')
+                if ultima_compra_giro:
+                    data_formatada = formatar_data(ultima_compra_giro.get('timestamp', 'N/A'))
+                    panel_logger.info(f"║    ║ 🟢 Última Compra: {ultima_compra_giro.get('quantidade', 0):.2f} {ativo_base} @ ${ultima_compra_giro.get('preco', 0):.6f}         ║")
+                    panel_logger.info(f"║    ║    em {data_formatada}                                                ║")
+                else:
+                    panel_logger.info(f"║    ║ 🟢 Última Compra: Nenhuma                                             ║")
+
+                # Última venda da estratégia Giro Rápido
+                ultima_venda_giro = status.get('ultima_venda_giro_rapido')
+                if ultima_venda_giro:
+                    data_formatada = formatar_data(ultima_venda_giro.get('timestamp', 'N/A'))
+                    lucro_venda_str = f"${ultima_venda_giro.get('lucro_usdt', 0):.2f}" if ultima_venda_giro.get('lucro_usdt') is not None else "N/A"
+                    panel_logger.info(f"║    ║ 🔴 Última Venda: {ultima_venda_giro.get('quantidade', 0):.2f} {ativo_base} @ ${ultima_venda_giro.get('preco', 0):.6f}          ║")
+                    panel_logger.info(f"║    ║    em {data_formatada} (Lucro: {lucro_venda_str})                     ║")
+                else:
+                    panel_logger.info(f"║    ║ 🔴 Última Venda: Nenhuma                                              ║")
+
+                panel_logger.info(f"║    ╚═══════════════════════════════════════════════════════════════════════╝")
+
                 panel_logger.info("╟──────────────────────────────────────────────────────────────────────────────╢")
 
             panel_logger.info(f"║ 🌐 SUMMARY TOTAL: Capital Total: ${total_capital_global:.2f} {quote_currency} | L/P Global: ${total_lucro_usdt_global:.2f} {quote_currency}")
