@@ -62,8 +62,20 @@ class StrategyDCA:
         # Configurações extraídas
         self.degraus_compra = config.get('DEGRAUS_COMPRA', [])
         self.cooldown_global_minutos = config.get('COOLDOWN_GLOBAL_APOS_COMPRA_MINUTOS', 30)
-        self.percentual_minimo_melhora_pm = config.get('PERCENTUAL_MINIMO_MELHORA_PM', 2.0)
+        self.percentual_minimo_melhora_pm = Decimal(str(config.get('PERCENTUAL_MINIMO_MELHORA_PM', 2.0)))
         self.gestao_risco = config.get('GESTAO_DE_RISCO', {})
+        
+        # Configuração do filtro RSI (opcional)
+        self.usar_filtro_rsi = bool(config.get('usar_filtro_rsi', True))
+        
+        # Limite de RSI para compras - só é obrigatório se o filtro estiver ativo
+        if self.usar_filtro_rsi:
+            self.limite_rsi = Decimal(str(config['rsi_limite_compra']))
+            # Timeframe do RSI - CONFIGURÁVEL (padrão: 4h)
+            self.rsi_timeframe = config.get('rsi_timeframe', '4h')
+        else:
+            self.limite_rsi = None  # Não é usado quando filtro está desabilitado
+            self.rsi_timeframe = None
         
         # Configuração de habilitação da estratégia (padrão: True)
         # Lê o flag booleano normalizado: config['ESTRATEGIAS']['dca']
@@ -72,20 +84,28 @@ class StrategyDCA:
         )
 
         self.logger.debug(f"🎯 Estratégia DCA inicializada com {len(self.degraus_compra)} degraus")
+        if self.usar_filtro_rsi:
+            self.logger.debug(f"   📈 Filtro RSI: ATIVO (limite: {self.limite_rsi}, timeframe: {self.rsi_timeframe})")
+        else:
+            self.logger.debug(f"   ⚠️ Filtro RSI: DESABILITADO")
     
     def verificar_oportunidade(
         self, 
         preco_atual: Decimal, 
         distancia_sma: Decimal,
-        saldo_usdt: Optional[Decimal] = None
+        saldo_usdt: Optional[Decimal] = None,
+        tempo_atual: Optional[datetime] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Verifica se existe oportunidade de compra DCA
+        
+        REFATORADO: Aceita tempo_atual opcional para backtesting.
         
         Args:
             preco_atual: Preço atual do ativo
             distancia_sma: Distância percentual desde a SMA de referência
             saldo_usdt: Saldo USDT disponível (opcional)
+            tempo_atual: Tempo atual (opcional - para backtesting). Se None, usa datetime.now()
             
         Returns:
             Dict com detalhes da oportunidade ou None se não houver
@@ -117,25 +137,30 @@ class StrategyDCA:
             capital_para_usar = self.gestao_capital.saldo_usdt * (percentual_capital / Decimal('100'))
             degrau_ativo['quantidade_ada'] = capital_para_usar / preco_atual
 
-            # Adicionar verificação de RSI
-            rsi_limite_compra = Decimal(str(self.config.get('RSI_LIMITE_COMPRA', 30)))
-            rsi_atual = self.worker.analise_tecnica.get_rsi(self.config['par'])
-            if rsi_atual is None:
-                self.logger.debug(f"📊 Compra bloqueada pelo RSI: RSI não disponível")
-                return None
-            elif rsi_atual >= rsi_limite_compra:
-                motivo = f"RSI {rsi_atual:.2f} >= {rsi_limite_compra}"
-                self.logger.debug(f"📊 Compra bloqueada pelo RSI: {motivo}")
-                self._notificar_compra_bloqueada(degrau_ativo, preco_atual, "RSI", motivo)
-                return None
+            # Verificação de RSI - SÓ EXECUTA SE O FILTRO ESTIVER ATIVO
+            if self.usar_filtro_rsi:
+                # Buscar RSI usando o timeframe configurável
+                rsi_atual = self.worker.analise_tecnica.get_rsi(
+                    par=self.config['par'],
+                    timeframe=self.rsi_timeframe
+                )
+                if rsi_atual is None:
+                    self.logger.debug(f"📊 Compra bloqueada pelo RSI: RSI não disponível ({self.rsi_timeframe})")
+                    return None
+                elif rsi_atual >= self.limite_rsi:
+                    motivo = f"RSI({self.rsi_timeframe}) {rsi_atual:.2f} >= {self.limite_rsi}"
+                    self.logger.debug(f"📊 Compra bloqueada pelo RSI: {motivo}")
+                    self._notificar_compra_bloqueada(degrau_ativo, preco_atual, "RSI", motivo)
+                    return None
+            # Se usar_filtro_rsi = False, a verificação é automaticamente aprovada (ignorada)
 
             
             # Verificar dupla-condição: SMA + melhora do preço médio (exceto em modo crash)
             if not modo_crash and not self._verificar_dupla_condicao(degrau_ativo, preco_atual, distancia_sma):
                 return None
             
-            # Verificar cooldowns (global + por degrau)
-            pode_comprar, motivo_bloqueio = self._verificar_cooldowns(degrau_ativo)
+            # Verificar cooldowns (global + por degrau) - passa tempo_atual para backtesting
+            pode_comprar, motivo_bloqueio = self._verificar_cooldowns(degrau_ativo, tempo_atual)
             if not pode_comprar:
                 self._gerenciar_notificacao_bloqueio(degrau_ativo['nivel'], motivo_bloqueio)
                 return None
@@ -165,7 +190,7 @@ class StrategyDCA:
             }
             
             # Log anti-spam (só 1x a cada 5 minutos por degrau)
-            self._log_oportunidade_encontrada(oportunidade)
+            self._log_oportunidade_encontrada(oportunidade, tempo_atual)
             
             return oportunidade
             
@@ -294,20 +319,50 @@ class StrategyDCA:
     
     def _encontrar_degrau_ativo(self, distancia_sma: Decimal) -> Optional[Dict[str, Any]]:
         """
-        Encontra o primeiro degrau ativo baseado na distância da SMA
+        Encontra o degrau mais profundo ativo baseado na distância da SMA.
+        
+        Lógica: Itera sobre TODOS os degraus e seleciona o de MAIOR gatilho_distancia_sma
+        que tenha sido ativado (distancia_sma >= gatilho).
         
         Args:
             distancia_sma: Distância percentual desde a SMA
             
         Returns:
-            Dicionário do degrau ativo ou None
+            Dicionário do degrau ativo mais profundo ou None
         """
+        # 1. Iniciar variável degrau_selecionado = None
+        degrau_selecionado = None
+        
+        # 2. Obter lista de degraus
+        # 3. Iterar sobre cada degrau
         for degrau in self.degraus_compra:
-            queda_necessaria = Decimal(str(degrau['gatilho_distancia_sma']))
-            if distancia_sma >= queda_necessaria:
-                degrau['queda_percentual'] = queda_necessaria # Adiciona a chave que faltava
-                return degrau
-        return None
+            # 4. Verificar se queda atual é MAIOR OU IGUAL ao gatilho deste degrau
+            gatilho_deste_degrau = Decimal(str(degrau['gatilho_distancia_sma']))
+            
+            if distancia_sma >= gatilho_deste_degrau:
+                # Este degrau é um candidato!
+                # 5. Verificar se ele é mais profundo que o degrau_selecionado atual
+                if degrau_selecionado is None:
+                    # Primeiro candidato encontrado
+                    degrau_selecionado = degrau
+                else:
+                    # Comparar com o candidato atual
+                    gatilho_selecionado = Decimal(str(degrau_selecionado['gatilho_distancia_sma']))
+                    if gatilho_deste_degrau > gatilho_selecionado:
+                        # 6. Este degrau é mais profundo - atualizar seleção
+                        degrau_selecionado = degrau
+        
+        # 7. Após o loop, verificar se encontrou algum degrau
+        # 8. Se nenhum degrau foi ativado, retornar None
+        if degrau_selecionado is None:
+            return None
+        
+        # Criar cópia para não modificar config original
+        degrau_ativo = degrau_selecionado.copy()
+        queda_necessaria = Decimal(str(degrau_selecionado['gatilho_distancia_sma']))
+        degrau_ativo['queda_percentual'] = queda_necessaria
+        
+        return degrau_ativo
     
     def _verificar_dupla_condicao(
         self, 
@@ -342,7 +397,7 @@ class StrategyDCA:
             return True
         
         # Verificar melhora mínima do preço médio
-        percentual_melhora = Decimal(str(self.percentual_minimo_melhora_pm)) / Decimal('100')
+        percentual_melhora = self.percentual_minimo_melhora_pm / Decimal('100')
         limite_preco_melhora = preco_medio_atual * (Decimal('1') - percentual_melhora)
         condicao_melhora_pm_ok = preco_atual <= limite_preco_melhora
         
@@ -359,17 +414,20 @@ class StrategyDCA:
         self.logger.debug(f"✅ Dupla-condição atendida para degrau {degrau['nivel']}")
         return True
     
-    def _verificar_cooldowns(self, degrau: Dict[str, Any]) -> tuple[bool, Optional[str]]:
+    def _verificar_cooldowns(self, degrau: Dict[str, Any], tempo_atual: Optional[datetime] = None) -> tuple[bool, Optional[str]]:
         """
         Verifica cooldowns global e por degrau
         
+        REFATORADO: Aceita tempo_atual opcional para backtesting.
+        
         Args:
             degrau: Configuração do degrau
+            tempo_atual: Tempo atual (opcional - para backtesting). Se None, usa datetime.now()
             
         Returns:
             Tuple (pode_comprar, motivo_bloqueio)
         """
-        agora = datetime.now()
+        agora = tempo_atual if tempo_atual is not None else datetime.now()
         nivel_degrau = degrau['nivel']
         
         # VERIFICAÇÃO 1: COOLDOWN GLOBAL (após qualquer compra)
@@ -430,12 +488,13 @@ class StrategyDCA:
             self.degraus_notificados_bloqueados.remove(nivel_degrau)
             self.logger.info(f"🔓 Degrau {nivel_degrau} desbloqueado")
     
-    def _log_oportunidade_encontrada(self, oportunidade: Dict[str, Any]):
+    def _log_oportunidade_encontrada(self, oportunidade: Dict[str, Any], tempo_atual: Optional[datetime] = None):
         """
         Log anti-spam para oportunidades encontradas
         
         Args:
             oportunidade: Dados da oportunidade
+            tempo_atual: Tempo atual (opcional - para backtesting). Se None, usa datetime.now()
         """
         nivel_degrau = oportunidade['degrau']
         if isinstance(nivel_degrau, str):  # Oportunidade extrema
@@ -443,7 +502,7 @@ class StrategyDCA:
             return
         
         # Anti-spam: só loga "Degrau X ativado" 1x a cada 5 minutos
-        agora = datetime.now()
+        agora = tempo_atual if tempo_atual is not None else datetime.now()
         ultima_log = self.ultima_tentativa_log_degrau.get(nivel_degrau)
         
         if ultima_log is None or (agora - ultima_log) >= timedelta(minutes=5):
@@ -480,17 +539,21 @@ class StrategyDCA:
     def registrar_compra_executada(
         self, 
         oportunidade: Dict[str, Any], 
-        quantidade_real: Optional[Decimal] = None
+        quantidade_real: Optional[Decimal] = None,
+        tempo_atual: Optional[datetime] = None
     ):
         """
         Registra que uma compra foi executada para ativar cooldowns
         
+        REFATORADO: Aceita tempo_atual opcional para backtesting.
+        
         Args:
             oportunidade: Dados da oportunidade executada
             quantidade_real: Quantidade realmente comprada (opcional)
+            tempo_atual: Tempo atual (opcional - para backtesting). Se None, usa datetime.now()
         """
         try:
-            agora = datetime.now()
+            agora = tempo_atual if tempo_atual is not None else datetime.now()
             timestamp_iso = agora.isoformat()
             
             # Registrar cooldown global

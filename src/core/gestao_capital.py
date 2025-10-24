@@ -39,7 +39,7 @@ class GestaoCapital:
     - Cada carteira tem seu próprio saldo alocado
     """
 
-    def __init__(self, saldo_usdt: Decimal = Decimal('0'), valor_posicao_ada: Decimal = Decimal('0'), percentual_reserva: Decimal = Decimal('8')):
+    def __init__(self, saldo_usdt: Decimal = Decimal('0'), valor_posicao_ada: Decimal = Decimal('0'), percentual_reserva: Decimal = Decimal('8'), modo_simulacao: bool = False):
         """
         Inicializar gestor de capital
 
@@ -47,10 +47,12 @@ class GestaoCapital:
             saldo_usdt: Saldo total atual em USDT
             valor_posicao_ada: Valor da posição em ADA (em USDT) - carteira acumulação
             percentual_reserva: Percentual da reserva (padrão: 8%)
+            modo_simulacao: Se True, permite atualização direta de saldo (para backtesting)
         """
         self.saldo_usdt = saldo_usdt
         self.percentual_reserva = percentual_reserva / Decimal('100')
         self.saldo_minimo = Decimal('5.00')
+        self.modo_simulacao = modo_simulacao
 
         # Carteiras separadas
         self.carteiras = {
@@ -76,6 +78,28 @@ class GestaoCapital:
         """
         self.alocacao_giro_rapido_pct = percentual
         logger.debug(f"⚙️ Alocação giro rápido configurada: {percentual}%")
+
+    def atualizar_saldo_usdt_simulado(self, novo_saldo: Decimal):
+        """
+        Atualiza o saldo USDT diretamente (usado em modo simulação)
+
+        IMPORTANTE: Este método só deve ser chamado em modo simulação,
+        quando o BotWorker precisa sincronizar o saldo após operações
+        na SimulatedExchangeAPI.
+
+        Args:
+            novo_saldo: Novo saldo USDT obtido da API simulada
+        """
+        if not self.modo_simulacao:
+            logger.warning("⚠️ Tentativa de atualizar saldo simulado fora do modo simulação - ignorando")
+            return
+
+        saldo_anterior = self.saldo_usdt
+        self.saldo_usdt = novo_saldo
+        
+        diferenca = novo_saldo - saldo_anterior
+        simbolo = "+" if diferenca >= 0 else ""
+        logger.debug(f"💰 Saldo USDT atualizado: ${saldo_anterior:.2f} → ${novo_saldo:.2f} ({simbolo}{diferenca:.2f})")
 
     def atualizar_saldos(self, saldo_usdt: Decimal, valor_posicao_ada: Decimal = Decimal('0'), carteira: str = 'acumulacao'):
         """

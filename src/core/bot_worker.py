@@ -79,7 +79,10 @@ class BotWorker:
         self.gerenciador_aportes = GerenciadorAportes(self.exchange_api, self.config)
         self.gerenciador_bnb = GerenciadorBNB(self.exchange_api, self.config)
         self.analise_tecnica = AnaliseTecnica(self.exchange_api)
-        self.gestao_capital = GestaoCapital(percentual_reserva=Decimal(str(self.config.get('PERCENTUAL_RESERVA', 8))))
+        self.gestao_capital = GestaoCapital(
+            percentual_reserva=Decimal(str(self.config.get('PERCENTUAL_RESERVA', 8))),
+            modo_simulacao=modo_simulacao
+        )
 
         # Banco de dados e estado
         self.db = DatabaseManager(
@@ -87,6 +90,10 @@ class BotWorker:
             backup_dir=Path(self.config['BACKUP_DIR'])
         )
         self.state = StateManager(state_file_path=Path(self.config['STATE_FILE_PATH']))
+
+        # Gerenciamento de Stop Loss / Trailing Stop Loss
+        self.stops_ativos = {'acumulacao': None, 'giro_rapido': None}
+        self._carregar_estado_stops()
 
         # ═══════════════════════════════════════
         # NOVA ARQUITETURA: Componentes Estratégicos
@@ -132,6 +139,9 @@ class BotWorker:
         self.rodando = False
         self.inicio_bot = datetime.now()
         
+        # Tempo simulado para backtesting
+        self.tempo_simulado_atual: Optional[datetime] = None
+        
         # Fila de comandos para controle remoto
         self.command_queue = queue.Queue()
         self.compras_pausadas_manualmente = False
@@ -161,6 +171,76 @@ class BotWorker:
         self.logger.info(f"   🎯 StrategyDCA: {'HABILITADA' if dca_habilitada else 'DESABILITADA'} ({len(self.strategy_dca.degraus_compra)} degraus)")
         self.logger.info(f"   💰 StrategySell: {len(self.strategy_sell.metas_venda)} metas")
         self.logger.info(f"   📈 StrategySwingTrade: {'HABILITADA' if giro_habilitado else 'DESABILITADA'}")
+
+    def _carregar_estado_stops(self):
+        """
+        Carrega o estado dos Stop Loss e Trailing Stop Loss do StateManager.
+
+        Recupera estados persistidos das duas carteiras (acumulacao, giro_rapido)
+        e restaura as configurações de stop loss ativas.
+        """
+        try:
+            stops_persistidos = self.state.get_state('stops_ativos_persistentes', {})
+
+            if stops_persistidos:
+                # Carregar estados para cada carteira
+                for carteira in ['acumulacao', 'giro_rapido']:
+                    if carteira in stops_persistidos and stops_persistidos[carteira]:
+                        dados_stop = stops_persistidos[carteira]
+
+                        # Reconstruir o estado do stop com conversão de tipos
+                        self.stops_ativos[carteira] = {
+                            'tipo': dados_stop.get('tipo'),
+                            'nivel_stop': Decimal(str(dados_stop['nivel_stop'])),
+                            'preco_pico': Decimal(str(dados_stop.get('preco_pico', 0))) if dados_stop.get('preco_pico') else None,
+                            'distancia_pct': Decimal(str(dados_stop.get('distancia_pct', 0))) if dados_stop.get('distancia_pct') else None
+                        }
+
+                        tipo_nome = "Stop Loss" if dados_stop.get('tipo') == 'sl' else "Trailing Stop Loss"
+                        self.logger.info(f"🔄 {tipo_nome} restaurado para carteira {carteira}: nível ${self.stops_ativos[carteira]['nivel_stop']:.4f}")
+                    else:
+                        self.stops_ativos[carteira] = None
+
+                self.logger.info("✅ Estado dos stops carregado com sucesso")
+            else:
+                self.logger.info("📝 Nenhum stop ativo persistido encontrado - iniciando com estado limpo")
+
+        except Exception as e:
+            self.logger.error(f"❌ Erro ao carregar estado dos stops: {e}")
+            self.logger.warning("⚠️ Continuando com estado limpo de stops")
+            self.stops_ativos = {'acumulacao': None, 'giro_rapido': None}
+
+    def _salvar_estado_stops(self):
+        """
+        Salva o estado atual dos Stop Loss e Trailing Stop Loss no StateManager.
+
+        Este método deve ser chamado sempre que um stop for:
+        - Ativado
+        - Desativado
+        - Atualizado (ex: trailing stop ajustando o nível)
+        """
+        try:
+            # Preparar dados para serialização JSON (converter Decimal para float)
+            stops_serializaveis = {}
+
+            for carteira, dados_stop in self.stops_ativos.items():
+                if dados_stop:
+                    stops_serializaveis[carteira] = {
+                        'tipo': dados_stop['tipo'],
+                        'nivel_stop': float(dados_stop['nivel_stop']),
+                        'preco_pico': float(dados_stop['preco_pico']) if dados_stop.get('preco_pico') else None,
+                        'distancia_pct': float(dados_stop['distancia_pct']) if dados_stop.get('distancia_pct') else None
+                    }
+                else:
+                    stops_serializaveis[carteira] = None
+
+            # Salvar no StateManager
+            self.state.set_state('stops_ativos_persistentes', stops_serializaveis)
+
+            self.logger.debug(f"💾 Estado dos stops salvo: {len([s for s in stops_serializaveis.values() if s])} stops ativos")
+
+        except Exception as e:
+            self.logger.error(f"❌ Erro ao salvar estado dos stops: {e}")
 
     def _sincronizar_saldos_exchange(self):
         """
@@ -193,9 +273,11 @@ class BotWorker:
             # 3. Comparar os dois valores
             diferenca_absoluta = abs(Decimal(str(saldo_base_real)) - quantidade_local)
 
-            # Calcular tolerância: 2.5% do saldo da API (mínimo 0.5)
+            # Calcular tolerância: usar percentual configurável do saldo da API (mínimo configurável)
             # Tolerância mais alta para evitar reimports por pequenas divergências
-            tolerancia = max(Decimal(str(saldo_base_real)) * Decimal('0.025'), Decimal('0.5'))
+            tolerancia_pct = Decimal(str(self.config.get('TOLERANCIA_DIVERGENCIA_PCT', 2.5))) / Decimal('100')
+            tolerancia_minima = Decimal(str(self.config.get('TOLERANCIA_DIVERGENCIA_MINIMA', 0.5)))
+            tolerancia = max(Decimal(str(saldo_base_real)) * tolerancia_pct, tolerancia_minima)
             
             self.logger.info(f"📏 Diferença detectada: {diferenca_absoluta:.2f} {base_currency} (tolerância: {tolerancia:.2f})")
 
@@ -261,7 +343,14 @@ class BotWorker:
 
             # Atualizar gestão de capital com saldos reais
             valor_posicao_base = Decimal(str(saldo_base_real)) * self._obter_preco_atual_seguro()
-            self.gestao_capital.atualizar_saldos(Decimal(str(saldo_quote_real)), valor_posicao_base)
+            
+            # Em modo simulação, usar o método específico para atualizar saldo USDT
+            if self.modo_simulacao:
+                self.gestao_capital.atualizar_saldo_usdt_simulado(Decimal(str(saldo_quote_real)))
+                # Atualizar valor da posição separadamente
+                self.gestao_capital.atualizar_saldos(Decimal(str(saldo_quote_real)), valor_posicao_base)
+            else:
+                self.gestao_capital.atualizar_saldos(Decimal(str(saldo_quote_real)), valor_posicao_base)
 
             self.logger.info(f"💼 Saldo final confirmado: {saldo_base_real:.1f} {base_currency} | ${saldo_quote_real:.2f} {quote_currency}")
 
@@ -353,6 +442,20 @@ class BotWorker:
             return Decimal(str(self.exchange_api.get_preco_atual(self.config['par'])))
         except:
             return Decimal('1.0')  # Fallback para evitar divisão por zero
+    
+    def _obter_tempo_atual(self) -> datetime:
+        """
+        Obtém o tempo atual correto baseado no modo de operação.
+        
+        IMPORTANTE: Em modo simulação, usa tempo_simulado_atual (dos dados históricos).
+        Em modo tempo real, usa datetime.now() (tempo do sistema).
+        
+        Returns:
+            datetime: Tempo atual (simulado ou real)
+        """
+        if self.modo_simulacao and self.tempo_simulado_atual is not None:
+            return self.tempo_simulado_atual
+        return datetime.now()
 
     def _atualizar_sma_referencia(self):
         """
@@ -360,18 +463,20 @@ class BotWorker:
         """
         agora = datetime.now()
 
-        # Atualizar apenas se passou 1 hora ou se nunca foi calculada
+        # Atualizar apenas se passou o intervalo configurado ou se nunca foi calculada
+        intervalo_atualizacao_horas = self.config.get('INTERVALO_ATUALIZACAO_SMA_HORAS', 1)
         if (
             self.ultima_atualizacao_sma is None
-            or (agora - self.ultima_atualizacao_sma) >= timedelta(hours=1)
+            or (agora - self.ultima_atualizacao_sma) >= timedelta(hours=intervalo_atualizacao_horas)
         ):
 
             self.logger.info("📊 Calculando SMA de referência (4 semanas)...")
             self.logger.info("🔄 Atualizando SMA de referência (4 semanas)...")
 
+            periodo_dias_sma = self.config.get('PERIODO_DIAS_SMA_REFERENCIA', 28)  # 4 semanas por padrão
             smas = self.analise_tecnica.calcular_sma_multiplos_timeframes(
                 simbolo=self.config['par'],
-                periodo_dias=28  # 4 semanas
+                periodo_dias=periodo_dias_sma
             )
 
             if smas:
@@ -464,11 +569,22 @@ class BotWorker:
                 # Atualizar position manager (com carteira correta)
                 self.position_manager.atualizar_apos_compra(quantidade_real, preco_real, carteira)
 
-                # Registrar na estratégia para ativar cooldowns
+                # MODO SIMULAÇÃO: Sincronizar saldo USDT com GestaoCapital
+                if self.modo_simulacao:
+                    novo_saldo_usdt = Decimal(str(self.exchange_api.get_saldo_disponivel('USDT')))
+                    self.gestao_capital.atualizar_saldo_usdt_simulado(novo_saldo_usdt)
+
+                # Registrar na estratégia para ativar cooldowns (passa tempo simulado em backtest)
                 if carteira == 'acumulacao':
-                    self.strategy_dca.registrar_compra_executada(oportunidade, quantidade_real)
+                    self.strategy_dca.registrar_compra_executada(
+                        oportunidade, 
+                        quantidade_real,
+                        tempo_atual=self._obter_tempo_atual()
+                    )
                 elif carteira == 'giro_rapido':
-                    self.strategy_swing_trade.registrar_compra_executada(oportunidade)
+                    # Passar tempo atual (timestamp em segundos) para swing trade
+                    tempo_atual_timestamp = self.tempo_simulado_atual.timestamp() if self.modo_simulacao and self.tempo_simulado_atual else None
+                    self.strategy_swing_trade.registrar_compra_executada(oportunidade, tempo_atual_timestamp)
 
                 # Determinar estratégia com base na carteira
                 estrategia_nome = 'acumulacao' if carteira == 'acumulacao' else 'giro_rapido'
@@ -580,10 +696,17 @@ class BotWorker:
 
             self.logger.info(f"✅ Verificação de saldo OK - Prosseguindo com venda")
 
+            # Determinar motivo de saída para rastreamento em backtests
+            # Tipos possíveis: META, SEGURANCA, MANUAL
+            motivo_saida = 'META' if oportunidade.get('meta') else 'SEGURANCA'
+            if tipo == 'manual':
+                motivo_saida = 'MANUAL'
+
             # Executar ordem na exchange
             ordem = self.exchange_api.place_ordem_venda_market(
                 par=self.config['par'],
-                quantidade=float(quantidade)
+                quantidade=float(quantidade),
+                motivo_saida=motivo_saida  # Passar motivo para API simulada
             )
 
             # Para KuCoin, market orders são executadas imediatamente, não retornam status FILLED
@@ -639,6 +762,11 @@ class BotWorker:
 
                 # Atualizar position manager (com carteira correta)
                 self.position_manager.atualizar_apos_venda(quantidade_real, carteira)
+
+                # MODO SIMULAÇÃO: Sincronizar saldo USDT com GestaoCapital
+                if self.modo_simulacao:
+                    novo_saldo_usdt = Decimal(str(self.exchange_api.get_saldo_disponivel('USDT')))
+                    self.gestao_capital.atualizar_saldo_usdt_simulado(novo_saldo_usdt)
 
                 # Registrar na estratégia
                 if carteira == 'acumulacao':
@@ -733,6 +861,11 @@ class BotWorker:
                 # Atualizar position manager
                 self.position_manager.atualizar_apos_compra(quantidade_real, preco_real)
 
+                # MODO SIMULAÇÃO: Sincronizar saldo USDT com GestaoCapital
+                if self.modo_simulacao:
+                    novo_saldo_usdt = Decimal(str(self.exchange_api.get_saldo_disponivel('USDT')))
+                    self.gestao_capital.atualizar_saldo_usdt_simulado(novo_saldo_usdt)
+
                 # Registrar na estratégia de vendas
                 self.strategy_sell.registrar_recompra_executada(oportunidade)
 
@@ -762,6 +895,317 @@ class BotWorker:
         except Exception as e:
             self.logger.error(f"❌ Erro ao executar recompra: {e}")
             return False
+
+    def _executar_venda_stop(self, carteira: str, tipo_stop: str):
+        """
+        Executa venda por acionamento de Stop Loss ou Trailing Stop Loss.
+
+        Args:
+            carteira: Nome da carteira ('acumulacao' ou 'giro_rapido')
+            tipo_stop: Tipo do stop ('sl' para Stop Loss, 'tsl' para Trailing Stop Loss)
+        """
+        try:
+            tipo_nome = "Stop Loss" if tipo_stop == 'sl' else "Trailing Stop Loss"
+            tipo_sigla = "SL" if tipo_stop == 'sl' else "TSL"
+
+            self.logger.warning(f"🚨 {tipo_nome} ACIONADO para carteira '{carteira}'")
+            self.logger.warning(f"   📊 Nível de stop: ${self.stops_ativos[carteira]['nivel_stop']:.4f}")
+
+            if tipo_stop == 'tsl':
+                self.logger.warning(f"   📈 Preço pico: ${self.stops_ativos[carteira]['preco_pico']:.4f}")
+                self.logger.warning(f"   📏 Distância: {self.stops_ativos[carteira]['distancia_pct']:.2f}%")
+
+            # ═══════════════════════════════════════════════════════════════════
+            # 1. DETERMINAR QUANTIDADE A VENDER
+            # ═══════════════════════════════════════════════════════════════════
+            quantidade_total_carteira = self.position_manager.get_quantidade_total(carteira)
+
+            if quantidade_total_carteira <= 0:
+                self.logger.warning(f"⚠️ Carteira '{carteira}' não possui posição para vender no stop")
+                # Limpar o stop mesmo sem posição
+                self.stops_ativos[carteira] = None
+                self._salvar_estado_stops()
+                return
+
+            # Determinar percentual de venda baseado na carteira
+            # OPÇÃO A: VENDA TOTAL (100%) PARA AMBAS AS CARTEIRAS
+            if carteira == 'giro_rapido':
+                # Giro Rápido: vender 100% da posição
+                percentual_venda = Decimal('100')
+                quantidade_a_vender = quantidade_total_carteira
+            else:
+                # Acumulação: vender 100% da posição (OPÇÃO A - Venda Total)
+                percentual_venda = Decimal('100')
+                quantidade_a_vender = quantidade_total_carteira
+
+            # Obter preço atual para cálculo de lucro
+            preco_atual = self._obter_preco_atual_seguro()
+            preco_medio = self.position_manager.get_preco_medio(carteira)
+
+            # Calcular lucro antes da venda
+            lucro_pct = Decimal('0')
+            if preco_medio:
+                lucro_pct = ((preco_atual - preco_medio) / preco_medio) * Decimal('100')
+
+            self.logger.warning(f"💰 Executando venda por {tipo_nome}:")
+            self.logger.warning(f"   • Quantidade total [{carteira}]: {quantidade_total_carteira:.4f}")
+            self.logger.warning(f"   • Percentual de venda: {percentual_venda:.1f}%")
+            self.logger.warning(f"   • Quantidade a vender: {quantidade_a_vender:.4f}")
+            self.logger.warning(f"   • Preço médio: ${preco_medio:.6f}")
+            self.logger.warning(f"   • Preço atual: ${preco_atual:.6f}")
+            self.logger.warning(f"   • Lucro: {lucro_pct:.2f}%")
+
+            # ═══════════════════════════════════════════════════════════════════
+            # 2. EXECUTAR ORDEM DE VENDA NA EXCHANGE
+            # ═══════════════════════════════════════════════════════════════════
+            base_currency = self.config['par'].split('/')[0]
+
+            # Determinar motivo de saída para rastreamento em backtests
+            motivo_saida = tipo_sigla  # 'SL' ou 'TSL'
+
+            ordem = self.exchange_api.place_ordem_venda_market(
+                par=self.config['par'],
+                quantidade=float(quantidade_a_vender),
+                motivo_saida=motivo_saida  # Passar motivo para API simulada
+            )
+
+            # Verificar se a ordem foi executada com sucesso
+            ordem_executada = False
+            if hasattr(self.exchange_api, '__class__') and 'Binance' in self.exchange_api.__class__.__name__:
+                ordem_executada = ordem and ordem.get('status') == 'FILLED'
+            else:
+                # KuCoin e outras exchanges
+                ordem_executada = ordem and (ordem.get('orderId') or ordem.get('id'))
+
+            # ═══════════════════════════════════════════════════════════════════
+            # 3. PROCESSAR RESULTADO DA VENDA
+            # ═══════════════════════════════════════════════════════════════════
+            if ordem_executada:
+                # Extrair dados da ordem executada
+                if hasattr(self.exchange_api, '__class__') and 'Binance' in self.exchange_api.__class__.__name__:
+                    quantidade_real = Decimal(str(ordem.get('executedQty', quantidade_a_vender)))
+                    valor_real = Decimal(str(ordem.get('cummulativeQuoteQty', '0')))
+                    preco_real = valor_real / quantidade_real if quantidade_real > 0 else preco_atual
+                else:
+                    quantidade_real = Decimal(str(quantidade_a_vender))
+                    valor_real = quantidade_real * preco_atual
+                    preco_real = preco_atual
+
+                # Recalcular lucro com preço real
+                lucro_usdt = Decimal('0')
+                if preco_medio:
+                    lucro_pct = ((preco_real - preco_medio) / preco_medio) * Decimal('100')
+                    lucro_usdt = (preco_real - preco_medio) * quantidade_real
+
+                self.logger.warning(f"✅ Venda por {tipo_nome} EXECUTADA com sucesso!")
+                self.logger.warning(f"   • Quantidade vendida: {quantidade_real:.4f} {base_currency}")
+                self.logger.warning(f"   • Preço de venda: ${preco_real:.6f}")
+                self.logger.warning(f"   • Valor total: ${valor_real:.2f}")
+                self.logger.warning(f"   • Lucro: ${lucro_usdt:.2f} ({lucro_pct:.2f}%)")
+
+                # Log estruturado de operação
+                self.main_logger.operacao_venda(
+                    par=self.config['par'],
+                    quantidade=float(quantidade_real),
+                    preco=float(preco_real),
+                    meta=f"{tipo_sigla}_{carteira}",
+                    lucro_pct=float(lucro_pct),
+                    lucro_usd=float(lucro_usdt)
+                )
+
+                # a. Atualizar position manager com a carteira correta
+                self.position_manager.atualizar_apos_venda(quantidade_real, carteira)
+
+                # b. Limpar o stop ativo para essa carteira
+                self.stops_ativos[carteira] = None
+
+                # c. Salvar estado dos stops
+                self._salvar_estado_stops()
+
+                # d. Enviar notificação de sucesso
+                if self.notifier:
+                    carteira_emoji = "📊" if carteira == 'acumulacao' else "🎯"
+                    carteira_nome = "Acumulação" if carteira == 'acumulacao' else "Giro Rápido"
+                    self.notifier.enviar_alerta(
+                        f"🚨 VENDA POR {tipo_sigla} [{carteira_emoji} {carteira_nome}]",
+                        f"Tipo: {tipo_nome}\n"
+                        f"Quantidade: {quantidade_real:.2f} {base_currency}\n"
+                        f"Preço: ${preco_real:.6f}\n"
+                        f"Valor: ${valor_real:.2f}\n"
+                        f"Lucro: ${lucro_usdt:.2f} ({lucro_pct:.2f}%)"
+                    )
+
+                # Extrair order_id com fallback
+                order_id = ordem.get('orderId') or ordem.get('id')
+                if not order_id:
+                    self.logger.warning(f"⚠️ Ordem de VENDA por {tipo_sigla} executada mas sem ID retornado pela exchange")
+
+                # Determinar estratégia com base na carteira
+                estrategia_nome = 'acumulacao' if carteira == 'acumulacao' else 'giro_rapido'
+
+                # Salvar no banco de dados
+                self._salvar_ordem_banco({
+                    'tipo': 'VENDA',
+                    'par': self.config['par'],
+                    'quantidade': quantidade_real,
+                    'preco': preco_real,
+                    'valor_total': valor_real,
+                    'taxa': ordem.get('fills', [{}])[0].get('commission', 0) if ordem.get('fills') else 0,
+                    'meta': f"{tipo_sigla}_{carteira}",
+                    'lucro_percentual': lucro_pct,
+                    'lucro_usdt': lucro_usdt,
+                    'order_id': order_id,
+                    'observacao': f"VENDA POR {tipo_nome.upper()} - Carteira: {carteira}"
+                }, estrategia=estrategia_nome)
+
+                self.logger.warning(f"🛡️ Stop {tipo_sigla} desativado para carteira '{carteira}'")
+
+            else:
+                # Falha na execução da ordem
+                self.logger.error(f"❌ FALHA ao executar venda por {tipo_nome}!")
+                self.logger.error(f"   Resposta da exchange: {ordem}")
+
+                # Enviar notificação de falha
+                if self.notifier:
+                    carteira_emoji = "📊" if carteira == 'acumulacao' else "🎯"
+                    carteira_nome = "Acumulação" if carteira == 'acumulacao' else "Giro Rápido"
+                    self.notifier.enviar_alerta(
+                        f"❌ FALHA VENDA POR {tipo_sigla} [{carteira_emoji} {carteira_nome}]",
+                        f"Tipo: {tipo_nome}\n"
+                        f"Quantidade tentada: {quantidade_a_vender:.2f} {base_currency}\n"
+                        f"Erro: Ordem não foi executada pela exchange\n"
+                        f"Verifique logs e estado da API"
+                    )
+
+                # Manter o stop ativo em caso de falha
+                self.logger.warning(f"⚠️ Stop {tipo_sigla} mantido ativo para carteira '{carteira}' devido à falha")
+
+        except Exception as e:
+            self.logger.error(f"❌ Erro crítico ao executar venda por {tipo_nome}: {e}")
+            import traceback
+            self.logger.error(f"Traceback:\n{traceback.format_exc()}")
+
+            # Enviar notificação de erro crítico
+            if self.notifier:
+                self.notifier.enviar_alerta(
+                    f"❌ ERRO CRÍTICO - VENDA POR {tipo_sigla}",
+                    f"Carteira: {carteira}\n"
+                    f"Tipo: {tipo_nome}\n"
+                    f"Erro: {str(e)}\n"
+                    f"Verifique logs imediatamente!"
+                )
+
+    def _ativar_stop_loss_inicial(self, oportunidade: Dict[str, Any]):
+        """
+        Ativa Stop Loss inicial após uma compra (usado principalmente por Giro Rápido).
+
+        Args:
+            oportunidade: Dicionário da oportunidade de compra que contém 'stop_loss_nivel'
+        """
+        try:
+            carteira = oportunidade.get('carteira', 'giro_rapido')
+            stop_loss_nivel = oportunidade.get('stop_loss_nivel')
+
+            if not stop_loss_nivel:
+                self.logger.warning(f"⚠️ Compra realizada sem nível de stop loss definido [{carteira}]")
+                return
+
+            # Ativar Stop Loss para a carteira
+            self.stops_ativos[carteira] = {
+                'tipo': 'sl',
+                'nivel_stop': Decimal(str(stop_loss_nivel)),
+                'preco_pico': None,  # SL fixo não usa pico
+                'distancia_pct': None  # SL fixo não usa distância
+            }
+
+            # Salvar estado persistente
+            self._salvar_estado_stops()
+
+            self.logger.info(f"🛡️ Stop Loss ATIVADO [{carteira}]")
+            self.logger.info(f"   📍 Nível: ${stop_loss_nivel:.6f}")
+            self.logger.info(f"   📊 Preco compra: ${oportunidade.get('preco_atual', 0):.6f}")
+
+            # Notificação
+            if self.notifier:
+                carteira_nome = "Giro Rápido" if carteira == 'giro_rapido' else "Acumulação"
+                self.notifier.enviar_info(
+                    f"🛡️ Stop Loss Ativado [{carteira_nome}]",
+                    f"Nível: ${stop_loss_nivel:.6f}"
+                )
+
+        except Exception as e:
+            self.logger.error(f"❌ Erro ao ativar Stop Loss inicial: {e}")
+
+    def _ativar_trailing_stop(self, oportunidade: Dict[str, Any], preco_atual: Decimal):
+        """
+        Ativa Trailing Stop Loss quando uma meta é atingida PELA PRIMEIRA VEZ.
+        
+        IMPORTANTE: Este método só deve ser chamado UMA ÚNICA VEZ por trade.
+        Depois de ativado, o TSL será apenas ATUALIZADO no loop principal.
+
+        Args:
+            oportunidade: Dicionário com dados da oportunidade (acao: 'ativar_tsl')
+            preco_atual: Preço atual da moeda
+        """
+        try:
+            carteira = oportunidade.get('carteira', 'acumulacao')
+            distancia_pct = oportunidade.get('distancia_pct')
+
+            if not distancia_pct:
+                self.logger.error(f"❌ Tentativa de ativar TSL sem distância_pct definida [{carteira}]")
+                return
+
+            distancia_pct = Decimal(str(distancia_pct))
+
+            # ═══════════════════════════════════════════════════════════════════
+            # VERIFICAÇÃO CRÍTICA: Se já existe um TSL ativo, NÃO reativar
+            # ═══════════════════════════════════════════════════════════════════
+            if self.stops_ativos.get(carteira) and self.stops_ativos[carteira]['tipo'] == 'tsl':
+                self.logger.warning(f"⚠️ TSL já está ATIVO para [{carteira}] - ignorando reativação")
+                self.logger.debug(f"   📊 Pico atual: ${self.stops_ativos[carteira]['preco_pico']:.6f}")
+                self.logger.debug(f"   📍 Nível stop atual: ${self.stops_ativos[carteira]['nivel_stop']:.6f}")
+                return
+
+            # Calcular nível inicial do TSL baseado no preço atual
+            nivel_stop_inicial = preco_atual * (Decimal('1') - distancia_pct / Decimal('100'))
+
+            # ═══════════════════════════════════════════════════════════════════
+            # ATIVAÇÃO ÚNICA: Criar novo TSL
+            # ═══════════════════════════════════════════════════════════════════
+            self.stops_ativos[carteira] = {
+                'tipo': 'tsl',
+                'nivel_stop': nivel_stop_inicial,
+                'preco_pico': preco_atual,  # Pico inicial é o preço atual
+                'distancia_pct': distancia_pct
+            }
+
+            # Cancelar qualquer Stop Loss inicial (sl) que estivesse ativo
+            # (relevante principalmente para Giro Rápido que pode ter sl inicial)
+            if self.stops_ativos.get(carteira) and self.stops_ativos[carteira].get('tipo') == 'sl':
+                self.logger.info(f"🔄 Cancelando Stop Loss inicial [{carteira}] (TSL assume controle)")
+
+            # Salvar estado persistente
+            self._salvar_estado_stops()
+
+            self.logger.info(f"🛡️ Trailing Stop Loss ATIVADO PELA PRIMEIRA VEZ [{carteira}]")
+            self.logger.info(f"   📈 Pico inicial: ${preco_atual:.6f}")
+            self.logger.info(f"   📍 Nível stop inicial: ${nivel_stop_inicial:.6f}")
+            self.logger.info(f"   📏 Distância configurada: {distancia_pct:.2f}%")
+            self.logger.info(f"   🎯 Meta atingida: {oportunidade.get('meta_atingida', 'N/A')}")
+
+            # Notificação
+            if self.notifier:
+                carteira_nome = "Acumulação" if carteira == 'acumulacao' else "Giro Rápido"
+                lucro_atual = oportunidade.get('lucro_atual', 0)
+                self.notifier.enviar_sucesso(
+                    f"🛡️ Trailing Stop Ativado [{carteira_nome}]",
+                    f"Meta atingida: {oportunidade.get('meta_atingida', 'N/A')}\n"
+                    f"Lucro atual: {lucro_atual:.2f}%\n"
+                    f"Nível stop: ${nivel_stop_inicial:.6f} ({distancia_pct:.2f}%)"
+                )
+
+        except Exception as e:
+            self.logger.error(f"❌ Erro ao ativar Trailing Stop Loss: {e}")
 
     def _salvar_ordem_banco(self, ordem_dados: Dict[str, Any], estrategia: str):
         """
@@ -882,8 +1326,9 @@ class BotWorker:
                 # Executar ciclo de decisão (que internamente chama get_preco_atual e avança o índice)
                 self._executar_ciclo_decisao()
 
-                # Log de progresso a cada 100 candles
-                if self.exchange_api.indice_atual % 100 == 0:
+                # Log de progresso a cada N candles (configurável)
+                intervalo_log_progresso = self.config.get('INTERVALO_LOG_PROGRESSO_CANDLES', 100)
+                if self.exchange_api.indice_atual % intervalo_log_progresso == 0:
                     progresso = (self.exchange_api.indice_atual / total_candles) * 100
                     self.logger.info(f"📊 Progresso: {self.exchange_api.indice_atual}/{total_candles} ({progresso:.1f}%)")
 
@@ -921,8 +1366,9 @@ class BotWorker:
             try:
                 self._executar_ciclo_decisao()
                 
-                # Pausa entre os ciclos no modo de tempo real
-                time.sleep(5)
+                # Pausa entre os ciclos no modo de tempo real (configurável)
+                intervalo_ciclo_segundos = self.config.get('INTERVALO_CICLO_SEGUNDOS', 5)
+                time.sleep(intervalo_ciclo_segundos)
 
             except KeyboardInterrupt:
                 self.logger.info("🛑 Interrupção solicitada pelo usuário.")
@@ -931,62 +1377,141 @@ class BotWorker:
             except Exception as e:
                 self.logger.error(f'Erro inesperado no loop principal: {e}', exc_info=True)
                 self.estado_bot = 'ERRO'
-                time.sleep(60)  # Pausa maior em caso de erro
+                pausa_apos_erro = self.config.get('PAUSA_APOS_ERRO_SEGUNDOS', 60)
+                time.sleep(pausa_apos_erro)  # Pausa maior em caso de erro
                 continue
 
     def _executar_ciclo_decisao(self):
         """
         Contém a lógica de decisão principal do bot, chamada em cada ciclo
         seja em tempo real ou em simulação.
+        
+        REFATORADO: Captura timestamp da barra em modo simulação para usar tempo histórico.
         """
         # Processar comandos remotos (relevante em ambos os modos)
         self._processar_comandos()
-        
-        # 1. Obter preço atual
-        preco_atual = Decimal(str(self.exchange_api.get_preco_atual(self.config['par'])))
-        
+
+        # 1. Obter preço atual (e timestamp em modo simulação)
+        if self.modo_simulacao and hasattr(self.exchange_api, 'get_barra_atual'):
+            # Modo simulação: obter dados completos da barra (timestamp + OHLCV)
+            barra = self.exchange_api.get_barra_atual(self.config['par'])
+            preco_atual = Decimal(str(barra['close']))
+            # CAPTURAR TIMESTAMP SIMULADO
+            self.tempo_simulado_atual = barra['timestamp']
+        else:
+            # Modo tempo real: obter apenas o preço
+            preco_atual = Decimal(str(self.exchange_api.get_preco_atual(self.config['par'])))
+
+        # ═══════════════════════════════════════════════════════════════════
+        # VERIFICAÇÃO E ATUALIZAÇÃO DE STOP LOSS E TRAILING STOP LOSS
+        # ═══════════════════════════════════════════════════════════════════
+        for carteira in ['acumulacao', 'giro_rapido']:
+            stop_ativo = self.stops_ativos.get(carteira)
+
+            if stop_ativo:
+                # ═══════════════════════════════════════════════════════════════
+                # ATUALIZAÇÃO CONTÍNUA: Se for TSL JÁ ATIVO, apenas atualizar
+                # ═══════════════════════════════════════════════════════════════
+                if stop_ativo['tipo'] == 'tsl':
+                    # a) Verificar se preço atual ultrapassou o pico registrado
+                    if preco_atual > stop_ativo['preco_pico']:
+                        # Atualizar pico e recalcular nível de stop
+                        stop_ativo['preco_pico'] = preco_atual
+                        stop_ativo['nivel_stop'] = preco_atual * (Decimal('1') - stop_ativo['distancia_pct'] / Decimal('100'))
+                        self._salvar_estado_stops()
+                        self.logger.debug(f"🔄 TSL ATUALIZADO [{carteira}]: Pico ${preco_atual:.4f}, Nível ${stop_ativo['nivel_stop']:.4f}")
+                    
+                    # b) Verificar se preço caiu abaixo do nível de stop
+                    if preco_atual <= stop_ativo['nivel_stop']:
+                        self.logger.warning(f"⚠️ Trailing Stop Loss ACIONADO [{carteira}]!")
+                        self.logger.warning(f"   📈 Pico máximo: ${stop_ativo['preco_pico']:.6f}")
+                        self.logger.warning(f"   📍 Nível stop: ${stop_ativo['nivel_stop']:.6f}")
+                        self.logger.warning(f"   📉 Preço atual: ${preco_atual:.6f}")
+                        self._executar_venda_stop(carteira, 'tsl')
+                        continue  # Pular resto do ciclo após executar venda
+                
+                # ═══════════════════════════════════════════════════════════════
+                # STOP LOSS FIXO: Verificar apenas se preço caiu abaixo do nível
+                # ═══════════════════════════════════════════════════════════════
+                elif stop_ativo['tipo'] == 'sl':
+                    if preco_atual <= stop_ativo['nivel_stop']:
+                        self.logger.warning(f"⚠️ Stop Loss ACIONADO [{carteira}]!")
+                        self.logger.warning(f"   📍 Nível stop: ${stop_ativo['nivel_stop']:.6f}")
+                        self.logger.warning(f"   📉 Preço atual: ${preco_atual:.6f}")
+                        self._executar_venda_stop(carteira, 'sl')
+                        continue  # Pular resto do ciclo após executar venda
+
         # Calcular distância da SMA
         distancia_sma = self._calcular_distancia_sma(preco_atual)
 
-        # 2. Verificar oportunidade de compra (DCA) - Carteira Acumulação
-        if distancia_sma:
-            oportunidade_compra = self.strategy_dca.verificar_oportunidade(
-                preco_atual=preco_atual,
-                distancia_sma=distancia_sma
-            )
-            if oportunidade_compra and self._executar_oportunidade_compra(oportunidade_compra):
-                self.logger.info("✅ Compra executada com sucesso (Acumulação)!")
-                if not self.modo_simulacao: time.sleep(10)
+        # ═══════════════════════════════════════════════════════════════════
+        # ESTRATÉGIA DCA/ACUMULAÇÃO (apenas se ativa)
+        # ═══════════════════════════════════════════════════════════════════
+        if self.estrategia_ativa in ['dca', 'ambas']:
+            # 2. Verificar oportunidade de compra (DCA) - Carteira Acumulação
+            if distancia_sma:
+                oportunidade_compra = self.strategy_dca.verificar_oportunidade(
+                    preco_atual=preco_atual,
+                    distancia_sma=distancia_sma,
+                    tempo_atual=self._obter_tempo_atual()  # Usa tempo simulado em backtest
+                )
+                if oportunidade_compra and self._executar_oportunidade_compra(oportunidade_compra):
+                    self.logger.info("✅ Compra executada com sucesso (Acumulação)!")
+                    pausa_apos_operacao = self.config.get('PAUSA_APOS_OPERACAO_SEGUNDOS', 10)
+                    if not self.modo_simulacao: time.sleep(pausa_apos_operacao)
+                    return
+
+            # 3. Verificar oportunidade de venda - Carteira Acumulação
+            oportunidade_venda = self.strategy_sell.verificar_oportunidade(preco_atual)
+            if oportunidade_venda:
+                # Verificar se é ativação de TSL
+                if oportunidade_venda.get('acao') == 'ativar_tsl':
+                    self._ativar_trailing_stop(oportunidade_venda, preco_atual)
+                    return
+                # Senão, é venda direta (vendas de segurança)
+                elif self._executar_oportunidade_venda(oportunidade_venda):
+                    self.logger.info("✅ Venda executada com sucesso (Acumulação)!")
+                    pausa_apos_operacao = self.config.get('PAUSA_APOS_OPERACAO_SEGUNDOS', 10)
+                    if not self.modo_simulacao: time.sleep(pausa_apos_operacao)
+                    return
+
+            # 4. Verificar recompras de segurança - Carteira Acumulação
+            oportunidade_recompra = self.strategy_sell.verificar_recompra_de_seguranca(preco_atual)
+            if oportunidade_recompra and self._executar_oportunidade_recompra(oportunidade_recompra):
+                self.logger.info("✅ Recompra executada com sucesso!")
+                pausa_apos_operacao = self.config.get('PAUSA_APOS_OPERACAO_SEGUNDOS', 10)
+                if not self.modo_simulacao: time.sleep(pausa_apos_operacao)
                 return
 
-        # 2b. Verificar oportunidade de Swing Trade (Giro Rápido)
-        if self.strategy_swing_trade.habilitado:
-            oportunidade_swing = self.strategy_swing_trade.verificar_oportunidade(preco_atual)
-            if oportunidade_swing:
-                if oportunidade_swing['tipo'] == 'compra':
-                    if self._executar_oportunidade_compra(oportunidade_swing):
-                        self.logger.info("✅ Compra executada com sucesso (Giro Rápido)!")
-                        if not self.modo_simulacao: time.sleep(10)
+        # ═══════════════════════════════════════════════════════════════════
+        # ESTRATÉGIA GIRO RÁPIDO (apenas se ativa)
+        # ═══════════════════════════════════════════════════════════════════
+        if self.estrategia_ativa in ['giro', 'ambas']:
+            # 2b. Verificar oportunidade de Swing Trade (Giro Rápido)
+            if self.strategy_swing_trade.habilitado:
+                # Passar tempo atual (timestamp em segundos) para swing trade
+                tempo_atual_timestamp = self.tempo_simulado_atual.timestamp() if self.modo_simulacao and self.tempo_simulado_atual else None
+                oportunidade_swing = self.strategy_swing_trade.verificar_oportunidade(preco_atual, tempo_atual_timestamp)
+                if oportunidade_swing:
+                    if oportunidade_swing.get('tipo') == 'compra':
+                        if self._executar_oportunidade_compra(oportunidade_swing):
+                            self.logger.info("✅ Compra executada com sucesso (Giro Rápido)!")
+                            # Ativar stop loss inicial
+                            self._ativar_stop_loss_inicial(oportunidade_swing)
+                            pausa_apos_operacao = self.config.get('PAUSA_APOS_OPERACAO_SEGUNDOS', 10)
+                            if not self.modo_simulacao: time.sleep(pausa_apos_operacao)
+                            return
+                    # Ativação de TSL
+                    elif oportunidade_swing.get('acao') == 'ativar_tsl':
+                        self._ativar_trailing_stop(oportunidade_swing, preco_atual)
                         return
-                elif oportunidade_swing['tipo'] == 'venda':
-                    if self._executar_oportunidade_venda(oportunidade_swing):
-                        self.logger.info("✅ Venda executada com sucesso (Giro Rápido)!")
-                        if not self.modo_simulacao: time.sleep(10)
-                        return
-
-        # 3. Verificar oportunidade de venda - Carteira Acumulação
-        oportunidade_venda = self.strategy_sell.verificar_oportunidade(preco_atual)
-        if oportunidade_venda and self._executar_oportunidade_venda(oportunidade_venda):
-            self.logger.info("✅ Venda executada com sucesso (Acumulação)!")
-            if not self.modo_simulacao: time.sleep(10)
-            return
-
-        # 4. Verificar recompras de segurança - Carteira Acumulação
-        oportunidade_recompra = self.strategy_sell.verificar_recompra_de_seguranca(preco_atual)
-        if oportunidade_recompra and self._executar_oportunidade_recompra(oportunidade_recompra):
-            self.logger.info("✅ Recompra executada com sucesso!")
-            if not self.modo_simulacao: time.sleep(10)
-            return
+                    # Venda direta (caso ainda existam - deprecated)
+                    elif oportunidade_swing.get('tipo') == 'venda':
+                        if self._executar_oportunidade_venda(oportunidade_swing):
+                            self.logger.info("✅ Venda executada com sucesso (Giro Rápido)!")
+                            pausa_apos_operacao = self.config.get('PAUSA_APOS_OPERACAO_SEGUNDOS', 10)
+                            if not self.modo_simulacao: time.sleep(pausa_apos_operacao)
+                            return
 
         # 5. Tarefas periódicas (só executam em tempo real)
         if not self.modo_simulacao:

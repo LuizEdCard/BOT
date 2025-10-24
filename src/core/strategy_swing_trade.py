@@ -78,21 +78,28 @@ class StrategySwingTrade:
         # Parâmetros de alocação
         self.alocacao_capital_pct = Decimal(str(self.estrategia_config.get('alocacao_capital_pct', 20)))
 
+        # Parâmetros de timeframe
+        self.timeframe = self.estrategia_config.get('timeframe', '15m')
+        self.lookback_periodos = int(self.estrategia_config.get('lookback_periodos_compra', 24))
+
         # Parâmetros de compra
         self.gatilho_compra_pct = Decimal(str(self.estrategia_config.get('gatilho_compra_pct', 2.0)))
 
         # Parâmetros de venda
         self.meta_lucro_pct = Decimal(str(self.estrategia_config.get('meta_lucro_pct', 3.5)))
 
-        # Proteção de lucro
+        # Parâmetros de Stop Loss Inicial (lido diretamente da raiz)
+        self.stop_loss_inicial_pct = Decimal(str(self.estrategia_config.get('stop_loss_inicial_pct', 1.5)))
+
+        # Parâmetros de Trailing Stop Loss (usando subseção protecao_lucro)
         protecao = self.estrategia_config.get('protecao_lucro', {})
-        self.protecao_ativacao_pct = Decimal(str(protecao.get('ativacao_pct', 2.0)))
-        self.protecao_reversao_pct = Decimal(str(protecao.get('venda_reversao_pct', 0.5)))
+        self.trailing_stop_ativacao_pct = Decimal(str(protecao.get('ativacao_pct', 2.0)))
+        self.trailing_stop_distancia_pct = Decimal(str(protecao.get('venda_reversao_pct', 0.8)))
 
         # Estado interno
         self.preco_referencia_maxima: Optional[Decimal] = None  # Máxima recente para gatilho de compra
         self.ultima_compra_timestamp: Optional[float] = None  # Timestamp da última compra para cooldown
-        self.cooldown_segundos: int = 60  # Cooldown mínimo entre compras (60 segundos)
+        self.cooldown_segundos: int = self.estrategia_config.get('cooldown_compra_segundos', 60)  # Cooldown mínimo entre compras
         self._inicializado_com_historico: bool = False  # Flag para saber se já buscou histórico
         self.ultima_log_status: Optional[float] = None  # Timestamp do último log de status (throttle 1 min)
 
@@ -100,10 +107,12 @@ class StrategySwingTrade:
         self.gestao_capital.configurar_alocacao_giro_rapido(self.alocacao_capital_pct)
 
         self.logger.info("📈 Estratégia de Giro Rápido HABILITADA")
+        self.logger.info(f"   Timeframe: {self.timeframe} (lookback: {self.lookback_periodos} períodos)")
         self.logger.info(f"   Alocação: {self.alocacao_capital_pct}% do capital livre")
         self.logger.info(f"   Gatilho compra: queda de {self.gatilho_compra_pct}%")
         self.logger.info(f"   Meta lucro: {self.meta_lucro_pct}%")
-        self.logger.info(f"   Proteção: ativa em {self.protecao_ativacao_pct}%, vende se cair {self.protecao_reversao_pct}%")
+        self.logger.info(f"   Stop Loss inicial: {self.stop_loss_inicial_pct}%")
+        self.logger.info(f"   TSL ativação: {self.trailing_stop_ativacao_pct}% | distância: {self.trailing_stop_distancia_pct}%")
 
         # IMPORTANTE: Inicializar preço de referência com histórico IMEDIATAMENTE
         # Isso evita que o primeiro preço consultado seja usado como referência
@@ -131,18 +140,19 @@ class StrategySwingTrade:
         else:
             self.logger.warning("⚠️ exchange_api NÃO está disponível - histórico NÃO será inicializado")
 
-    def verificar_oportunidade(self, preco_atual: Decimal) -> Optional[Dict[str, Any]]:
+    def verificar_oportunidade(self, preco_atual: Decimal, tempo_atual: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """
         Verifica se existe oportunidade de trade (compra ou venda)
 
         Args:
             preco_atual: Preço atual do ativo
+            tempo_atual: Timestamp atual em segundos (opcional - para backtesting). Se None, usa time.time()
 
         Returns:
             Dict com dados da oportunidade ou None
         """
         if not self.habilitado:
-            self.logger.debug("📈 Giro Rápido: estratégia desabilitada")
+            self.logger.debug("[SwingTrade] Estratégia DESABILITADA nas configurações")
             return None
 
         # Atualizar preço de referência máxima
@@ -154,8 +164,8 @@ class StrategySwingTrade:
 
         # Log de estado a cada 60 segundos (não a cada verificação para evitar spam)
         import time
-        tempo_atual = time.time()
-        if self.ultima_log_status is None or (tempo_atual - self.ultima_log_status) >= 60:
+        agora_timestamp = tempo_atual if tempo_atual is not None else time.time()
+        if self.ultima_log_status is None or (agora_timestamp - self.ultima_log_status) >= 60:
             ref_max_str = f"${self.preco_referencia_maxima:.6f}" if self.preco_referencia_maxima else "None"
             self.logger.info(
                 f"📊 Giro Rápido | Preço: ${preco_atual:.6f} | "
@@ -163,11 +173,11 @@ class StrategySwingTrade:
                 f"Posição: {quantidade:.4f} | "
                 f"Status: {'COM posição' if tem_posicao else 'SEM posição'}"
             )
-            self.ultima_log_status = tempo_atual
+            self.ultima_log_status = agora_timestamp
 
         if not tem_posicao:
             # SEM POSIÇÃO: Verificar oportunidade de COMPRA
-            return self._verificar_oportunidade_compra(preco_atual)
+            return self._verificar_oportunidade_compra(preco_atual, agora_timestamp)
         else:
             # COM POSIÇÃO: Verificar oportunidade de VENDA
             return self._verificar_oportunidade_venda(preco_atual)
@@ -206,18 +216,18 @@ class StrategySwingTrade:
             return
 
         try:
-            # Buscar últimos 24 candles de 1 hora (24 horas de histórico)
+            # Buscar histórico com timeframe configurado
             par = self.config.get('par', 'XRP/USDT')
             # Manter o formato com barra para que a API da exchange converta corretamente
             # (KuCoin converte / para -, Binance mantém sem separador)
 
             self.logger.info(f"🔍 Buscando histórico de preços para inicializar referência máxima...")
-            self.logger.info(f"   🔧 Par: {par}, Intervalo: 1h, Limite: 24 candles")
+            self.logger.info(f"   🔧 Par: {par}, Timeframe: {self.timeframe}, Lookback: {self.lookback_periodos} períodos")
 
             klines = self.exchange_api.obter_klines(
                 simbolo=par,
-                intervalo='1h',
-                limite=24
+                intervalo=self.timeframe,
+                limite=self.lookback_periodos
             )
 
             self.logger.info(f"   🔧 Klines recebidas: {len(klines) if klines else 0} candles")
@@ -237,7 +247,7 @@ class StrategySwingTrade:
                 self.preco_referencia_maxima = preco_maximo_historico
 
                 self.logger.info(f"✅ Preço de referência inicializado com HISTÓRICO:")
-                self.logger.info(f"   📊 Máxima dos últimos {len(klines)} candles (1h): ${preco_maximo_historico:.6f}")
+                self.logger.info(f"   📊 Máxima dos últimos {len(klines)} candles ({self.timeframe}): ${preco_maximo_historico:.6f}")
                 self.logger.info(f"   📊 Preço atual: ${preco_atual:.6f}")
 
                 # Calcular se já está em queda
@@ -261,12 +271,13 @@ class StrategySwingTrade:
             self.logger.error(f"   🔧 Traceback detalhado:\n{traceback.format_exc()}")
             self.logger.warning(f"⚠️ Usando preço atual como fallback: ${preco_atual:.6f}")
 
-    def _verificar_oportunidade_compra(self, preco_atual: Decimal) -> Optional[Dict[str, Any]]:
+    def _verificar_oportunidade_compra(self, preco_atual: Decimal, tempo_atual: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """
         Verifica oportunidade de compra quando NÃO há posição
 
         Args:
             preco_atual: Preço atual do ativo
+            tempo_atual: Timestamp atual em segundos (opcional - para backtesting). Se None, usa time.time()
 
         Returns:
             Dict com dados da oportunidade de compra ou None
@@ -280,13 +291,26 @@ class StrategySwingTrade:
         # VERIFICAR COOLDOWN: Evitar múltiplas compras em sequência rápida
         if self.ultima_compra_timestamp is not None:
             import time
-            tempo_desde_ultima_compra = time.time() - self.ultima_compra_timestamp
+            agora = tempo_atual if tempo_atual is not None else time.time()
+            tempo_desde_ultima_compra = agora - self.ultima_compra_timestamp
             if tempo_desde_ultima_compra < self.cooldown_segundos:
                 self.logger.debug(f"⏱️ Cooldown ativo: {int(self.cooldown_segundos - tempo_desde_ultima_compra)}s restantes")
                 return None
 
         # Calcular queda percentual desde a máxima
         queda_pct = ((self.preco_referencia_maxima - preco_atual) / self.preco_referencia_maxima) * Decimal('100')
+        
+        # Calcular preço de gatilho
+        preco_gatilho = self.preco_referencia_maxima * (Decimal('1') - self.gatilho_compra_pct / Decimal('100'))
+
+        # DEBUG: Log detalhado da lógica de compra
+        self.logger.debug(
+            f"[SwingTrade] Posição VAZIA. Pico Recente: ${self.preco_referencia_maxima:.6f}. "
+            f"Preço Atual: ${preco_atual:.6f}. Gatilho de Compra: ${preco_gatilho:.6f}."
+        )
+        self.logger.debug(
+            f"[SwingTrade] Queda calculada: {queda_pct:.2f}% (gatilho: {self.gatilho_compra_pct}%)"
+        )
 
         # Log sobre a queda (usando INFO para garantir visibilidade)
         self.logger.info(
@@ -297,12 +321,17 @@ class StrategySwingTrade:
 
         # Verificar se atingiu o gatilho de compra
         if queda_pct >= self.gatilho_compra_pct:
+            self.logger.debug(f"[SwingTrade] ✅ Gatilho de compra ATINGIDO!")
             # Calcular quanto comprar (100% do capital disponível da carteira giro_rapido)
             capital_disponivel = self.gestao_capital.calcular_capital_disponivel('giro_rapido')
 
             self.logger.debug(f"💰 Giro Rápido | Capital disponível: ${capital_disponivel:.2f}")
 
             if capital_disponivel <= 0:
+                self.logger.debug(
+                    f"[SwingTrade] Compra BLOQUEADA. Capital disponível: ${capital_disponivel:.2f} "
+                    f"(alocação: {self.alocacao_capital_pct}%)"
+                )
                 self.logger.warning("⚠️ Oportunidade de compra detectada, mas SEM CAPITAL disponível!")
                 self.logger.warning(f"   Verifique saldo USDT e configuração de alocação ({self.alocacao_capital_pct}%)")
                 return None
@@ -310,6 +339,9 @@ class StrategySwingTrade:
             # Verificar valor mínimo de ordem
             valor_minimo = Decimal(str(self.config.get('VALOR_MINIMO_ORDEM', 5.0)))
             if capital_disponivel < valor_minimo:
+                self.logger.debug(
+                    f"[SwingTrade] Compra BLOQUEADA. Capital ${capital_disponivel:.2f} < mínimo ${valor_minimo:.2f}"
+                )
                 self.logger.warning(f"⚠️ Capital disponível (${capital_disponivel:.2f}) abaixo do mínimo (${valor_minimo:.2f})")
                 return None
 
@@ -317,6 +349,7 @@ class StrategySwingTrade:
             pode_comprar, motivo = self.gestao_capital.pode_comprar(capital_disponivel, 'giro_rapido')
 
             if not pode_comprar:
+                self.logger.debug(f"[SwingTrade] Compra BLOQUEADA pela gestão de capital: {motivo}")
                 self.logger.warning(f"⚠️ Compra bloqueada pela gestão de capital: {motivo}")
                 if self.notifier:
                     titulo = "Compra Bloqueada (Giro Rápido)"
@@ -331,10 +364,14 @@ class StrategySwingTrade:
 
             quantidade = capital_disponivel / preco_atual
 
+            # Calcular nível de stop loss inicial
+            stop_loss_nivel = preco_atual * (Decimal('1') - self.stop_loss_inicial_pct / Decimal('100'))
+
             self.logger.info(f"🎯 OPORTUNIDADE DE COMPRA (Giro Rápido)")
             self.logger.info(f"   Queda: {queda_pct:.2f}% desde ${self.preco_referencia_maxima:.6f}")
             self.logger.info(f"   Preço atual: ${preco_atual:.6f}")
             self.logger.info(f"   Valor: ${capital_disponivel:.2f} ({quantidade:.4f} moedas)")
+            self.logger.info(f"   🛡️ Stop Loss: ${stop_loss_nivel:.6f} ({self.stop_loss_inicial_pct}%)")
 
             return {
                 'tipo': 'compra',
@@ -344,8 +381,14 @@ class StrategySwingTrade:
                 'valor_operacao': capital_disponivel,
                 'motivo': f'Queda de {queda_pct:.2f}% - Giro Rápido',
                 'queda_pct': queda_pct,
-                'preco_referencia': self.preco_referencia_maxima
+                'preco_referencia': self.preco_referencia_maxima,
+                'stop_loss_nivel': stop_loss_nivel  # Nível de stop loss inicial
             }
+        else:
+            # DEBUG: Log quando compra é bloqueada
+            self.logger.debug(
+                f"[SwingTrade] Compra BLOQUEADA. Preço ${preco_atual:.6f} não atingiu o gatilho de ${preco_gatilho:.6f}."
+            )
 
         return None
 
@@ -375,63 +418,83 @@ class StrategySwingTrade:
         # Atualizar high water mark
         self.position_manager.atualizar_high_water_mark(lucro_atual, 'giro_rapido')
         high_water_mark = self.position_manager.get_high_water_mark('giro_rapido')
+        
+        # Obter preço médio e calcular pico TSL (se aplicável)
+        preco_medio = self.position_manager.get_preco_medio('giro_rapido')
+        pico_tsl = preco_medio * (Decimal('1') + high_water_mark / Decimal('100')) if preco_medio else None
+        nivel_stop = pico_tsl * (Decimal('1') - self.trailing_stop_distancia_pct / Decimal('100')) if pico_tsl else None
 
-        self.logger.debug(f"📊 Giro Rápido - Lucro: {lucro_atual:.2f}% | HWM: {high_water_mark:.2f}%")
+        # DEBUG: Log detalhado da lógica de venda
+        pico_tsl_str = f"{pico_tsl:.6f}" if pico_tsl is not None else "N/A"
+        nivel_stop_str = f"{nivel_stop:.6f}" if nivel_stop is not None else "N/A"
+        self.logger.debug(
+            f"[SwingTrade] Posição ATIVA. Lucro: {lucro_atual:.2f}%. Meta: {self.meta_lucro_pct:.2f}%. "
+            f"Pico TSL: ${pico_tsl_str}. Nível Stop: ${nivel_stop_str}."
+        )
+        self.logger.debug(f"📈 Giro Rápido - Lucro: {lucro_atual:.2f}% | HWM: {high_water_mark:.2f}%")
 
-        # 1. Verificar META PRINCIPAL de lucro
+        # ═════════════════════════════════════════════════════════════════
+        # 1. VERIFICAÇÃO DE META PRINCIPAL - ATIVAR TSL UMA ÚNICA VEZ
+        # ═════════════════════════════════════════════════════════════════
+        # IMPORTANTE: Este retorno será chamado apenas UMA VEZ quando a meta for
+        # atingida. O BotWorker verifica se TSL já está ativo antes de reativar.
+        # Após ativação, o TSL é ATUALIZADO automaticamente no loop principal.
+        # ═════════════════════════════════════════════════════════════════
         if lucro_atual >= self.meta_lucro_pct:
-            quantidade_total = self.position_manager.get_quantidade_total('giro_rapido')
-
+            self.logger.debug(f"[SwingTrade] ✅ META DE LUCRO ATINGIDA: {lucro_atual:.2f}% >= {self.meta_lucro_pct:.2f}%")
             self.logger.info(f"🎯 META DE LUCRO ATINGIDA (Giro Rápido)")
             self.logger.info(f"   Lucro atual: {lucro_atual:.2f}%")
             self.logger.info(f"   Meta: {self.meta_lucro_pct:.2f}%")
-            self.logger.info(f"   Quantidade: {quantidade_total:.4f} moedas")
+            self.logger.info(f"   🛡️ Ativando Trailing Stop Loss ({self.trailing_stop_distancia_pct}%)")
 
             return {
-                'tipo': 'venda',
+                'acao': 'ativar_tsl',
                 'carteira': 'giro_rapido',
-                'quantidade_venda': quantidade_total,
-                'percentual_venda': 100,
+                'distancia_pct': self.trailing_stop_distancia_pct,
                 'preco_atual': preco_atual,
-                'lucro_percentual': lucro_atual,
-                'motivo': f'Meta de lucro atingida: {lucro_atual:.2f}% - Giro Rápido',
-                'tipo_venda': 'meta_lucro'
+                'lucro_atual': lucro_atual,
+                'motivo': f'Meta de lucro atingida: {lucro_atual:.2f}% - Ativando TSL',
+                'meta_atingida': f'Meta {self.meta_lucro_pct}%'
             }
 
-        # 2. Verificar PROTEÇÃO DE LUCRO (trailing stop)
-        if high_water_mark >= self.protecao_ativacao_pct:
-            # Proteção ativada - verificar se houve reversão
-            gatilho_venda = high_water_mark - self.protecao_reversao_pct
+        # ═════════════════════════════════════════════════════════════════
+        # 2. VERIFICAÇÃO DE THRESHOLD DE ATIVAÇÃO - ATIVAR TSL UMA ÚNICA VEZ
+        # ═════════════════════════════════════════════════════════════════
+        # Se meta principal não foi atingida, verificar threshold de ativação menor.
+        # BotWorker garante que TSL só é ativado uma vez. Após isso, é apenas atualizado.
+        # ═════════════════════════════════════════════════════════════════
+        if lucro_atual >= self.trailing_stop_ativacao_pct:
+            self.logger.debug(f"[SwingTrade] ✅ THRESHOLD DE TSL ATINGIDO: {lucro_atual:.2f}% >= {self.trailing_stop_ativacao_pct:.2f}%")
+            self.logger.info(f"🛡️ GATILHO DE TSL ATINGIDO (Giro Rápido)")
+            self.logger.info(f"   Lucro atual: {lucro_atual:.2f}%")
+            self.logger.info(f"   Threshold: {self.trailing_stop_ativacao_pct:.2f}%")
+            self.logger.info(f"   🛡️ Ativando Trailing Stop Loss ({self.trailing_stop_distancia_pct}%)")
 
-            if lucro_atual <= gatilho_venda:
-                quantidade_total = self.position_manager.get_quantidade_total('giro_rapido')
-
-                self.logger.info(f"🛡️ PROTEÇÃO DE LUCRO ATIVADA (Giro Rápido)")
-                self.logger.info(f"   High water mark: {high_water_mark:.2f}%")
-                self.logger.info(f"   Lucro atual: {lucro_atual:.2f}%")
-                self.logger.info(f"   Gatilho venda: {gatilho_venda:.2f}%")
-                self.logger.info(f"   Reversão: {self.protecao_reversao_pct:.2f}%")
-
-                return {
-                    'tipo': 'venda',
-                    'carteira': 'giro_rapido',
-                    'quantidade_venda': quantidade_total,
-                    'percentual_venda': 100,
-                    'preco_atual': preco_atual,
-                    'lucro_percentual': lucro_atual,
-                    'motivo': f'Proteção de lucro: reversão de {self.protecao_reversao_pct:.2f}% - Giro Rápido',
-                    'tipo_venda': 'protecao_lucro',
-                    'high_water_mark': high_water_mark
-                }
+            return {
+                'acao': 'ativar_tsl',
+                'carteira': 'giro_rapido',
+                'distancia_pct': self.trailing_stop_distancia_pct,
+                'preco_atual': preco_atual,
+                'lucro_atual': lucro_atual,
+                'motivo': f'Threshold de TSL atingido: {lucro_atual:.2f}%',
+                'threshold_atingido': f'{self.trailing_stop_ativacao_pct}%'
+            }
+        else:
+            # DEBUG: Log quando nenhuma condição de venda é atingida
+            self.logger.debug(
+                f"[SwingTrade] Nenhuma condição de venda atingida. "
+                f"Lucro {lucro_atual:.2f}% < Meta {self.meta_lucro_pct:.2f}% e < Threshold TSL {self.trailing_stop_ativacao_pct:.2f}%"
+            )
 
         return None
 
-    def registrar_compra_executada(self, oportunidade: Dict[str, Any]):
+    def registrar_compra_executada(self, oportunidade: Dict[str, Any], tempo_atual: Optional[float] = None):
         """
         Registra que uma compra foi executada
 
         Args:
             oportunidade: Dados da oportunidade que foi executada
+            tempo_atual: Timestamp atual em segundos (opcional - para backtesting). Se None, usa time.time()
         """
         import time
 
@@ -439,7 +502,7 @@ class StrategySwingTrade:
         self.preco_referencia_maxima = oportunidade['preco_atual']
 
         # Registrar timestamp da compra para ativar cooldown
-        self.ultima_compra_timestamp = time.time()
+        self.ultima_compra_timestamp = tempo_atual if tempo_atual is not None else time.time()
 
         self.logger.info(f"📈 Compra executada (Giro Rápido) - Nova referência: ${self.preco_referencia_maxima:.6f}")
         self.logger.info(f"⏱️ Cooldown ativado: próxima compra permitida em {self.cooldown_segundos}s")
