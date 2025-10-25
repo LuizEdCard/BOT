@@ -1,0 +1,128 @@
+{
+  "_comentario_geral": "Template de configuração COMPLETO para backtesting e produção. Ajuste os valores conforme a necessidade.",
+  
+  "nome_instancia": "Backtest_Bot",
+  "exchange": "binance", 
+  "par": "ADA/USDT",
+  "AMBIENTE": "backtest", 
+
+  "_secao_caminhos": "Caminhos de persistência. No backtest, estes são sobrescritos por valores temporários.",
+  "DATABASE_PATH": "dados/backtest_trades.db",
+  "BACKUP_DIR": "dados/backups/backtest",
+  "STATE_FILE_PATH": "dados/backtest_state.json",
+
+  "_secao_api": "Chaves de API (lidas do arquivo .env)",
+  "api_key_env": "BINANCE_API_KEY",
+  "api_secret_env": "BINANCE_API_SECRET",
+  "api_passphrase_env": null,
+
+  "_secao_capital": "Gestão de capital (Valores de simulação)",
+  "CAPITAL_INICIAL": 1000.0,
+  "PERCENTUAL_RESERVA": 8.0,
+  "VALOR_MINIMO_ORDEM": 5.0,
+
+  "_secao_timing": "Controles de tempo e estratégia principal",
+  "COOLDOWN_GLOBAL_APOS_COMPRA_MINUTOS": 10,
+  "PERCENTUAL_MINIMO_MELHORA_PM": 1.25,
+
+  "_secao_aportes": "Sistema de aportes automáticos (desabilitado para backtest)",
+  "APORTES": {
+    "habilitado": false,
+    "intervalo_verificacao_minutos": 30,
+    "valor_minimo_brl_para_converter": 50.0
+  },
+
+  "_secao_selecao_estrategias": "Interruptores para ativar/desativar estratégias",
+  "ESTRATEGIAS": {
+    "dca": { "habilitado": true },
+    "giro_rapido": { "habilitado": true }
+  },
+
+  
+  "_secao_dca_filtros": "Filtros de entrada para DCA",
+  "usar_filtro_rsi": false,
+  "rsi_limite_compra": 35,
+  "rsi_timeframe": "1h",
+  "PERIODO_DIAS_SMA_REFERENCIA": 28,
+  "INTERVALO_ATUALIZACAO_SMA_HORAS": 1,
+
+  "_secao_dca_degraus": "Degraus de compra DCA (baseado na queda da SMA)",
+  "DEGRAUS_COMPRA": [
+    {
+      "nivel": 1,
+      "gatilho_distancia_sma": 5,
+      "percentual_capital_usar": 10,
+      "intervalo_horas": 24
+    },
+    {
+      "nivel": 2,
+      "gatilho_distancia_sma": 10,
+      "percentual_capital_usar": 15,
+      "intervalo_horas": 48
+    },
+    {
+      "nivel": 3,
+      "gatilho_distancia_sma": 15,
+      "percentual_capital_usar": 25,
+      "intervalo_horas": 72
+    }
+  ],
+  
+  "_secao_dca_vendas": "Metas de venda DCA (ativam o Trailing Stop)",
+  "METAS_VENDA": [
+    {
+      "meta": "Meta 1 (Lucro 20%)",
+      "gatilho_lucro_pct": 20
+    },
+    {
+      "meta": "Meta 2 (Lucro 40%)",
+      "gatilho_lucro_pct": 40
+    }
+  ],
+
+  "_secao_dca_stops": "Gestão de Saída (Stops) da Acumulação",
+  "gestao_saida_acumulacao": {
+    "trailing_stop_distancia_pct": 2.0,
+    "percentual_venda_trailing_stop": 100,
+    "stop_loss_catastrofico_pct": 10.0
+  },
+
+  "_secao_dca_oportunidade": "Compras de Oportunidade Extrema (quando exposição está alta)",
+  "GESTAO_DE_RISCO": {
+    "exposicao_maxima_percentual_capital": 85.0,
+    "compras_de_oportunidade_extrema": [
+      { "tipo": "absoluto", "preco_alvo": 0.60, "percentual_capital_usar": 25 },
+      { "tipo": "percentual_pm", "queda_pm_pct": 10.0, "percentual_capital_usar": 25 }
+    ]
+  },
+
+
+
+  "estrategia_giro_rapido": {
+    "habilitado": true,
+    "alocacao_capital_pct": 20,
+    
+    "_comentario_entrada": "Lógica de entrada",
+    "timeframe": "15m",
+    "lookback_periodos_compra": 96,
+    "gatilho_compra_pct": 2.0,
+    
+    "usar_filtro_rsi_entrada": true,
+    "rsi_timeframe_entrada": "15m",
+    "rsi_limite_compra": 30,
+
+    "_comentario_saida": "Lógica de saída (Stop Promovido)",
+    "stop_loss_inicial_pct": 2.5,
+    "trailing_stop_distancia_pct": 0.8
+  },
+  
+
+  
+  "_secao_auditoria": "Valores de fallback do código, centralizados aqui",
+  "TOLERANCIA_DIVERGENCIA_PCT": 2.5,
+  "TOLERANCIA_DIVERGENCIA_MINIMA": 0.5,
+  "INTERVALO_LOG_PROGRESSO_CANDLES": 100,
+  "INTERVALO_CICLO_SEGUNDOS": 5,
+  "PAUSA_APOS_ERRO_SEGUNDOS": 60,
+  "PAUSA_APOS_OPERACAO_SEGUNDOS": 10
+}

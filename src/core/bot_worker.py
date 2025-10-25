@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import time
 import queue
 import logging
+import pandas as pd
 from decimal import Decimal
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any
@@ -83,6 +84,15 @@ class BotWorker:
             percentual_reserva=Decimal(str(self.config.get('PERCENTUAL_RESERVA', 8))),
             modo_simulacao=modo_simulacao
         )
+        
+        # ===========================================================================
+        # CONFIGURAR ALOCAÇÃO DE GIRO RÁPIDO (CRÍTICO!)
+        # ===========================================================================
+        # Obter percentual de alocação da configuração do giro rápido
+        estrategia_giro_config = self.config.get('estrategia_giro_rapido', {})
+        alocacao_giro_pct = Decimal(str(estrategia_giro_config.get('alocacao_capital_pct', 20)))
+        self.gestao_capital.configurar_alocacao_giro_rapido(alocacao_giro_pct)
+        self.logger.info(f"⚙️  Alocação do Giro Rápido configurada: {alocacao_giro_pct}% do saldo livre")
 
         # Banco de dados e estado
         self.db = DatabaseManager(
@@ -117,6 +127,7 @@ class BotWorker:
             config=self.config,
             position_manager=self.position_manager,
             state_manager=self.state,
+            carteira='acumulacao',  # StrategySell gerencia vendas da carteira de acumulação
             logger=sell_logger
         )
 
@@ -161,16 +172,22 @@ class BotWorker:
         self.estado_bot: str = "OPERANDO"
         self.ja_avisou_sem_saldo: bool = False
         
-        # Log de inicialização com status das estratégias
-        estrategias_config = self.config.get('ESTRATEGIAS', {})
-        dca_habilitada = estrategias_config.get('dca', True)
-        giro_habilitado = estrategias_config.get('giro_rapido', False)
+        # Log de inicialização com status real das instâncias da estratégia
+        self.logger.info(f"🤖 BotWorker inicializado. Verificando estado das estratégias:")
         
-        self.logger.info(f"🤖 BotWorker inicializado com arquitetura de estratégias")
-        self.logger.info(f"   📊 PositionManager (acumulação): {'COM POSIÇÃO' if self.position_manager.tem_posicao('acumulacao') else 'SEM POSIÇÃO'}")
-        self.logger.info(f"   🎯 StrategyDCA: {'HABILITADA' if dca_habilitada else 'DESABILITADA'} ({len(self.strategy_dca.degraus_compra)} degraus)")
-        self.logger.info(f"   💰 StrategySell: {len(self.strategy_sell.metas_venda)} metas")
-        self.logger.info(f"   📈 StrategySwingTrade: {'HABILITADA' if giro_habilitado else 'DESABILITADA'}")
+        # StrategyDCA
+        dca_status = "HABILITADA" if self.strategy_dca.habilitado else "DESABILITADA"
+        self.logger.info(f"   - StrategyDCA: {dca_status} ({len(self.strategy_dca.degraus_compra)} degraus)")
+
+        # StrategySell (sempre ativa, opera com base na posição)
+        self.logger.info(f"   - StrategySell: ATIVA (baseada em posição, {len(self.strategy_sell.metas_venda)} metas)")
+
+        # StrategySwingTrade
+        swing_status = "HABILITADA" if self.strategy_swing_trade.habilitado else "DESABILITADA"
+        if self.strategy_swing_trade.habilitado:
+            self.logger.info(f"   - StrategySwingTrade: {swing_status} (Timeframe: {self.strategy_swing_trade.timeframe})")
+        else:
+            self.logger.info(f"   - StrategySwingTrade: {swing_status}")
 
     def _carregar_estado_stops(self):
         """
@@ -522,11 +539,28 @@ class BotWorker:
             
             self.logger.info(f"🎯 Executando oportunidade de compra: {oportunidade['motivo']}")
             
+            # Determinar valor em quote (USDT) para simulação
+            # Em simulação, a API espera valor em USDT; em tempo real, espera quantidade do ativo
+            valor_quote = None
+            if self.modo_simulacao:
+                valor_quote = oportunidade.get('valor_ordem') or oportunidade.get('valor_operacao')
+                if valor_quote is None:
+                    valor_quote = Decimal(str(quantidade)) * Decimal(str(preco_atual))
+
             # Executar ordem na exchange
-            ordem = self.exchange_api.place_ordem_compra_market(
-                par=self.config['par'],
-                quantidade=float(quantidade)
-            )
+            if self.modo_simulacao:
+                ordem = self.exchange_api.place_ordem_compra_market(
+                    par=self.config['par'],
+                    quantidade=float(valor_quote),
+                    motivo_compra=tipo.upper(),
+                    carteira=carteira
+                )
+            else:
+                ordem = self.exchange_api.place_ordem_compra_market(
+                    par=self.config['par'],
+                    quantidade=float(quantidade),
+                    carteira=carteira
+                )
 
             # Para KuCoin, market orders são executadas imediatamente, não retornam status FILLED
             # Para Binance, verifica o status
@@ -539,12 +573,17 @@ class BotWorker:
                 ordem_executada = ordem and (ordem.get('orderId') or ordem.get('id'))
             
             if ordem_executada:
-                # Binance: usa executedQty e cummulativeQuoteQty
-                if hasattr(self.exchange_api, '__class__') and 'Binance' in self.exchange_api.__class__.__name__:
-                    quantidade_real = Decimal(str(ordem.get('executedQty', quantidade)))
-                    preco_real = Decimal(str(ordem.get('cummulativeQuoteQty', '0'))) / quantidade_real if quantidade_real > 0 else preco_atual
+                # Usar dados retornados da ordem quando disponíveis (Binance/Simulada)
+                executed_qty = ordem.get('executedQty')
+                quote_total = ordem.get('cummulativeQuoteQty')
+                if executed_qty is not None:
+                    quantidade_real = Decimal(str(executed_qty))
+                    if quote_total is not None and quantidade_real > 0:
+                        preco_real = Decimal(str(quote_total)) / quantidade_real
+                    else:
+                        preco_real = preco_atual
                 else:
-                    # KuCoin: market orders usam a quantidade solicitada
+                    # Fallback: usar quantidade solicitada e preço atual
                     quantidade_real = Decimal(str(quantidade))
                     preco_real = preco_atual
 
@@ -572,7 +611,7 @@ class BotWorker:
                 # MODO SIMULAÇÃO: Sincronizar saldo USDT com GestaoCapital
                 if self.modo_simulacao:
                     novo_saldo_usdt = Decimal(str(self.exchange_api.get_saldo_disponivel('USDT')))
-                    self.gestao_capital.atualizar_saldo_usdt_simulado(novo_saldo_usdt)
+                    self.gestao_capital.set_saldo_usdt_simulado(novo_saldo_usdt, carteira)
 
                 # Registrar na estratégia para ativar cooldowns (passa tempo simulado em backtest)
                 if carteira == 'acumulacao':
@@ -604,7 +643,8 @@ class BotWorker:
                     'taxa': ordem.get('fills', [{}])[0].get('commission', 0) if ordem.get('fills') else 0,
                     'meta': str(oportunidade.get('degrau', 'oportunidade')),
                     'order_id': order_id,
-                    'observacao': f"{tipo.upper()}: {oportunidade['motivo']}"
+                    'observacao': f"{tipo.upper()}: {oportunidade['motivo']}",
+                    'timestamp': self._obter_tempo_atual().isoformat()
                 }, estrategia=estrategia_nome)
 
                 return True
@@ -706,7 +746,8 @@ class BotWorker:
             ordem = self.exchange_api.place_ordem_venda_market(
                 par=self.config['par'],
                 quantidade=float(quantidade),
-                motivo_saida=motivo_saida  # Passar motivo para API simulada
+                motivo_saida=motivo_saida,  # Passar motivo para API simulada
+                carteira=carteira
             )
 
             # Para KuCoin, market orders são executadas imediatamente, não retornam status FILLED
@@ -720,13 +761,15 @@ class BotWorker:
                 ordem_executada = ordem and (ordem.get('orderId') or ordem.get('id'))
             
             if ordem_executada:
-                # Binance: usa executedQty e cummulativeQuoteQty
-                if hasattr(self.exchange_api, '__class__') and 'Binance' in self.exchange_api.__class__.__name__:
-                    quantidade_real = Decimal(str(ordem.get('executedQty', quantidade)))
-                    valor_real = Decimal(str(ordem.get('cummulativeQuoteQty', '0')))
+                # Usar dados retornados da ordem quando disponíveis (Binance/Simulada)
+                executed_qty = ordem.get('executedQty')
+                quote_total = ordem.get('cummulativeQuoteQty')
+                if executed_qty is not None:
+                    quantidade_real = Decimal(str(executed_qty))
+                    valor_real = Decimal(str(quote_total)) if quote_total is not None else quantidade_real * preco_atual
                     preco_real = valor_real / quantidade_real if quantidade_real > 0 else preco_atual
                 else:
-                    # KuCoin: market orders usam a quantidade solicitada
+                    # Fallback: usar quantidade solicitada e preço atual
                     quantidade_real = Decimal(str(quantidade))
                     valor_real = quantidade_real * preco_atual
                     preco_real = preco_atual
@@ -766,7 +809,7 @@ class BotWorker:
                 # MODO SIMULAÇÃO: Sincronizar saldo USDT com GestaoCapital
                 if self.modo_simulacao:
                     novo_saldo_usdt = Decimal(str(self.exchange_api.get_saldo_disponivel('USDT')))
-                    self.gestao_capital.atualizar_saldo_usdt_simulado(novo_saldo_usdt)
+                    self.gestao_capital.set_saldo_usdt_simulado(novo_saldo_usdt, carteira)
 
                 # Registrar na estratégia
                 if carteira == 'acumulacao':
@@ -794,7 +837,8 @@ class BotWorker:
                     'lucro_percentual': lucro_pct,
                     'lucro_usdt': lucro_usdt,
                     'order_id': order_id,
-                    'observacao': f"{tipo.upper()}: {oportunidade['motivo']}"
+                    'observacao': f"{tipo.upper()}: {oportunidade['motivo']}",
+                    'timestamp': self._obter_tempo_atual().isoformat()
                 }, estrategia=estrategia_nome)
 
                 return True
@@ -809,24 +853,41 @@ class BotWorker:
     def _executar_oportunidade_recompra(self, oportunidade: Dict[str, Any]) -> bool:
         """
         Executa uma oportunidade de recompra de segurança
-        
+
         Args:
             oportunidade: Dados da oportunidade de recompra
-            
+
         Returns:
             bool: True se recompra foi executada com sucesso
         """
         try:
             quantidade = oportunidade['quantidade']
             preco_atual = oportunidade['preco_atual']
-            
+            carteira = oportunidade.get('carteira', 'acumulacao')  # Padrão: acumulacao
+
             self.logger.info(f"🔄 Executando recompra: {oportunidade['motivo']}")
-            
+
+            # Determinar valor em quote (USDT) para simulação
+            valor_quote = None
+            if self.modo_simulacao:
+                valor_quote = oportunidade.get('valor_ordem') or oportunidade.get('valor_operacao')
+                if valor_quote is None:
+                    valor_quote = Decimal(str(quantidade)) * Decimal(str(preco_atual))
+
             # Executar ordem na exchange
-            ordem = self.exchange_api.place_ordem_compra_market(
-                par=self.config['par'],
-                quantidade=float(quantidade)
-            )
+            if self.modo_simulacao:
+                ordem = self.exchange_api.place_ordem_compra_market(
+                    par=self.config['par'],
+                    quantidade=float(valor_quote),
+                    motivo_compra='RECOMPRA',
+                    carteira=carteira
+                )
+            else:
+                ordem = self.exchange_api.place_ordem_compra_market(
+                    par=self.config['par'],
+                    quantidade=float(quantidade),
+                    carteira=carteira
+                )
 
             # Para KuCoin, market orders são executadas imediatamente, não retornam status FILLED
             # Para Binance, verifica o status
@@ -839,13 +900,15 @@ class BotWorker:
                 ordem_executada = ordem and (ordem.get('orderId') or ordem.get('id'))
             
             if ordem_executada:
-                # Binance: usa executedQty e cummulativeQuoteQty
-                if hasattr(self.exchange_api, '__class__') and 'Binance' in self.exchange_api.__class__.__name__:
-                    quantidade_real = Decimal(str(ordem.get('executedQty', quantidade)))
-                    valor_real = Decimal(str(ordem.get('cummulativeQuoteQty', '0')))
+                # Usar dados retornados da ordem quando disponíveis (Binance/Simulada)
+                executed_qty = ordem.get('executedQty')
+                quote_total = ordem.get('cummulativeQuoteQty')
+                if executed_qty is not None:
+                    quantidade_real = Decimal(str(executed_qty))
+                    valor_real = Decimal(str(quote_total)) if quote_total is not None else quantidade_real * preco_atual
                     preco_real = valor_real / quantidade_real if quantidade_real > 0 else preco_atual
                 else:
-                    # KuCoin: market orders usam a quantidade solicitada
+                    # Fallback: usar quantidade solicitada e preço atual
                     quantidade_real = Decimal(str(quantidade))
                     valor_real = quantidade_real * preco_atual
                     preco_real = preco_atual
@@ -858,13 +921,14 @@ class BotWorker:
                     queda_pct=0
                 )
 
-                # Atualizar position manager
-                self.position_manager.atualizar_apos_compra(quantidade_real, preco_real)
+                # Atualizar position manager (recompras sempre são da carteira acumulação)
+                carteira_recompra = 'acumulacao'
+                self.position_manager.atualizar_apos_compra(quantidade_real, preco_real, carteira_recompra)
 
                 # MODO SIMULAÇÃO: Sincronizar saldo USDT com GestaoCapital
                 if self.modo_simulacao:
                     novo_saldo_usdt = Decimal(str(self.exchange_api.get_saldo_disponivel('USDT')))
-                    self.gestao_capital.atualizar_saldo_usdt_simulado(novo_saldo_usdt)
+                    self.gestao_capital.set_saldo_usdt_simulado(novo_saldo_usdt, carteira_recompra)
 
                 # Registrar na estratégia de vendas
                 self.strategy_sell.registrar_recompra_executada(oportunidade)
@@ -884,7 +948,8 @@ class BotWorker:
                     'taxa': ordem.get('fills', [{}])[0].get('commission', 0) if ordem.get('fills') else 0,
                     'meta': f"recompra_{oportunidade['zona_nome']}",
                     'order_id': order_id,
-                    'observacao': f"RECOMPRA: {oportunidade['motivo']}"
+                    'observacao': f"RECOMPRA: {oportunidade['motivo']}",
+                    'timestamp': self._obter_tempo_atual().isoformat()
                 }, estrategia='acumulacao')
 
                 return True
@@ -966,7 +1031,8 @@ class BotWorker:
             ordem = self.exchange_api.place_ordem_venda_market(
                 par=self.config['par'],
                 quantidade=float(quantidade_a_vender),
-                motivo_saida=motivo_saida  # Passar motivo para API simulada
+                motivo_saida=motivo_saida,  # Passar motivo para API simulada
+                carteira=carteira
             )
 
             # Verificar se a ordem foi executada com sucesso
@@ -981,10 +1047,12 @@ class BotWorker:
             # 3. PROCESSAR RESULTADO DA VENDA
             # ═══════════════════════════════════════════════════════════════════
             if ordem_executada:
-                # Extrair dados da ordem executada
-                if hasattr(self.exchange_api, '__class__') and 'Binance' in self.exchange_api.__class__.__name__:
-                    quantidade_real = Decimal(str(ordem.get('executedQty', quantidade_a_vender)))
-                    valor_real = Decimal(str(ordem.get('cummulativeQuoteQty', '0')))
+                # Extrair dados da ordem executada (usar executedQty/cummulativeQuoteQty quando disponíveis)
+                executed_qty = ordem.get('executedQty')
+                quote_total = ordem.get('cummulativeQuoteQty')
+                if executed_qty is not None:
+                    quantidade_real = Decimal(str(executed_qty))
+                    valor_real = Decimal(str(quote_total)) if quote_total is not None else quantidade_real * preco_atual
                     preco_real = valor_real / quantidade_real if quantidade_real > 0 else preco_atual
                 else:
                     quantidade_real = Decimal(str(quantidade_a_vender))
@@ -1055,7 +1123,8 @@ class BotWorker:
                     'lucro_percentual': lucro_pct,
                     'lucro_usdt': lucro_usdt,
                     'order_id': order_id,
-                    'observacao': f"VENDA POR {tipo_nome.upper()} - Carteira: {carteira}"
+                    'observacao': f"VENDA POR {tipo_nome.upper()} - Carteira: {carteira}",
+                    'timestamp': self._obter_tempo_atual().isoformat()
                 }, estrategia=estrategia_nome)
 
                 self.logger.warning(f"🛡️ Stop {tipo_sigla} desativado para carteira '{carteira}'")
@@ -1264,37 +1333,52 @@ class BotWorker:
 
     def run(self):
         """
-        Loop principal simplificado do bot worker
+        Loop principal do bot worker.
         """
         try:
             self.main_logger.banner("🤖 BOT DE TRADING INICIADO")
             self.logger.info(f"Par: {self.config['par']}")
             self.logger.info(f"Ambiente: {self.config['AMBIENTE']}")
+            self.logger.info(f"Modo Simulação: {'ATIVADO' if self.modo_simulacao else 'DESATIVADO'}")
             self.logger.info(f"Capital inicial: ${self.config['CAPITAL_INICIAL']}")
 
-            # Verificar conectividade
-            if not self.exchange_api.check_connection():
-                self.logger.error("❌ Falha na conexão com a exchange")
-                return
-
-            self.logger.info("✅ Conectado à Exchange")
-
-            # Sincronização inicial
-            self._sincronizar_saldos_exchange()
-
-            # Calcular SMA inicial
-            self._atualizar_sma_referencia()
+            if not self.modo_simulacao:
+                if not self.exchange_api.check_connection():
+                    self.logger.error("❌ Falha na conexão com a exchange")
+                    return
+                self.logger.info("✅ Conectado à Exchange")
+                self._sincronizar_saldos_exchange()
+                self._atualizar_sma_referencia()
 
             self.rodando = True
-            contador_ciclos = 0
-
-            # ═══════════════════════════════════════
-            # SELEÇÃO DO MODO DE OPERAÇÃO
-            # ═══════════════════════════════════════
+            
             if self.modo_simulacao:
+                self._sincronizar_saldos_exchange()
                 self._run_simulacao()
             else:
-                self._run_tempo_real()
+                # Lógica de operação em tempo real (produção)
+                self.logger.info("🟢 Iniciando worker em MODO DE TEMPO REAL.")
+                while self.rodando:
+                    try:
+                        preco_atual = self._obter_preco_atual_seguro()
+                        # Capturar tempo real para passar para funções de cooldown
+                        tempo_atual = datetime.now()
+                        
+                        self._executar_ciclo_decisao(preco_atual, tempo_atual)
+                        
+                        intervalo_ciclo_segundos = self.config.get('INTERVALO_CICLO_SEGUNDOS', 5)
+                        time.sleep(intervalo_ciclo_segundos)
+
+                    except KeyboardInterrupt:
+                        self.logger.info("🛑 Interrupção solicitada pelo usuário.")
+                        self.rodando = False
+                        continue
+                    except Exception as e:
+                        self.logger.error(f'Erro inesperado no loop principal: {e}', exc_info=True)
+                        self.estado_bot = 'ERRO'
+                        pausa_apos_erro = self.config.get('PAUSA_APOS_ERRO_SEGUNDOS', 60)
+                        time.sleep(pausa_apos_erro)
+                        continue
         
         except Exception as e:
             self.logger.error(f"❌ Erro fatal no bot: {e}", exc_info=True)
@@ -1302,105 +1386,50 @@ class BotWorker:
 
     def _run_simulacao(self):
         """
-        Loop de execução para o modo de simulação (backtesting).
-
-        REFATORADO: Itera explicitamente pelos dados históricos usando indice_atual
-        para garantir que todos os candles sejam processados.
+        Executa o loop principal para o modo de simulação (backtesting).
+        Itera sobre os dados históricos e usa o timestamp da vela como o tempo atual.
         """
         self.logger.info("🏁 Iniciando worker em MODO DE SIMULAÇÃO.")
-
-        # Verificar se a API tem o atributo indice_atual e dados_completos
-        if not hasattr(self.exchange_api, 'indice_atual') or not hasattr(self.exchange_api, 'dados_completos'):
-            self.logger.error("❌ SimulatedExchangeAPI não possui atributos necessários (indice_atual/dados_completos)")
-            self.rodando = False
-            return
-
-        total_candles = len(self.exchange_api.dados_completos)
-        self.logger.info(f"📊 Total de candles para processar: {total_candles}")
-
-        # ═══════════════════════════════════════════════════════════════════
-        # LOOP PRINCIPAL: Iterar enquanto há dados históricos
-        # ═══════════════════════════════════════════════════════════════════
-        while self.rodando and self.exchange_api.indice_atual < total_candles:
+        # Atualizar SMA de referência antes de iniciar o loop de simulação
+        try:
+            self._atualizar_sma_referencia()
+        except Exception as e:
+            self.logger.warning(f"⚠️ Não foi possível calcular SMA de referência antes da simulação: {e}")
+        
+        # Loop principal do backtest
+        while self.rodando and (barra := self.exchange_api.get_barra_atual()) is not None:
             try:
-                # Executar ciclo de decisão (que internamente chama get_preco_atual e avança o índice)
-                self._executar_ciclo_decisao()
-
-                # Log de progresso a cada N candles (configurável)
-                intervalo_log_progresso = self.config.get('INTERVALO_LOG_PROGRESSO_CANDLES', 100)
-                if self.exchange_api.indice_atual % intervalo_log_progresso == 0:
-                    progresso = (self.exchange_api.indice_atual / total_candles) * 100
-                    self.logger.info(f"📊 Progresso: {self.exchange_api.indice_atual}/{total_candles} ({progresso:.1f}%)")
-
-            except StopIteration:
-                # StopIteration é lançado quando get_preco_atual não tem mais dados
-                self.logger.info("🏁 Fim dos dados históricos (StopIteration).")
-                self.rodando = False
-                break
+                # TEMPO SIMULADO: Capturar timestamp da barra
+                tempo_simulado = pd.to_datetime(barra['timestamp'])
+                preco_atual = Decimal(str(barra['close']))
+                
+                # Executa o ciclo de decisão com os dados e tempo da simulação
+                # Passando tempo_simulado para todas as funções que verificam cooldowns
+                self._executar_ciclo_decisao(preco_atual, tempo_simulado)
 
             except KeyboardInterrupt:
                 self.logger.info("🛑 Interrupção solicitada pelo usuário durante a simulação.")
                 self.rodando = False
                 break
-
             except Exception as e:
                 self.logger.error(f'❌ Erro inesperado no loop de simulação: {e}', exc_info=True)
-                import traceback
-                self.logger.error(f"Traceback:\n{traceback.format_exc()}")
                 self.rodando = False
                 break
-
-        # ═══════════════════════════════════════════════════════════════════
-        # FINALIZAÇÃO: Logar resultados
-        # ═══════════════════════════════════════════════════════════════════
-        self.logger.info(f"🏁 Simulação finalizada. Candles processados: {self.exchange_api.indice_atual}/{total_candles}")
-
+        
+        self.logger.info("🏁 Simulação finalizada.")
         if hasattr(self.exchange_api, 'get_resultados'):
             self._logar_resultados_simulacao()
 
-    def _run_tempo_real(self):
-        """Loop de execução para o modo de operação em tempo real."""
-        self.logger.info("🟢 Iniciando worker em MODO DE TEMPO REAL.")
-        
-        while self.rodando:
-            try:
-                self._executar_ciclo_decisao()
-                
-                # Pausa entre os ciclos no modo de tempo real (configurável)
-                intervalo_ciclo_segundos = self.config.get('INTERVALO_CICLO_SEGUNDOS', 5)
-                time.sleep(intervalo_ciclo_segundos)
-
-            except KeyboardInterrupt:
-                self.logger.info("🛑 Interrupção solicitada pelo usuário.")
-                self.rodando = False
-                continue
-            except Exception as e:
-                self.logger.error(f'Erro inesperado no loop principal: {e}', exc_info=True)
-                self.estado_bot = 'ERRO'
-                pausa_apos_erro = self.config.get('PAUSA_APOS_ERRO_SEGUNDOS', 60)
-                time.sleep(pausa_apos_erro)  # Pausa maior em caso de erro
-                continue
-
-    def _executar_ciclo_decisao(self):
+    def _executar_ciclo_decisao(self, preco_atual: Decimal, tempo_atual: datetime):
         """
-        Contém a lógica de decisão principal do bot, chamada em cada ciclo
-        seja em tempo real ou em simulação.
-        
-        REFATORADO: Captura timestamp da barra em modo simulação para usar tempo histórico.
+        Contém a lógica de decisão principal do bot, chamada em cada ciclo.
+        É agnóstico ao modo (simulação ou tempo real), operando com o tempo e preço fornecidos.
         """
-        # Processar comandos remotos (relevante em ambos os modos)
+        # Atualizar o tempo do worker (relevante para simulação)
+        self.tempo_simulado_atual = tempo_atual if self.modo_simulacao else None
+
+        # Processar comandos remotos
         self._processar_comandos()
-
-        # 1. Obter preço atual (e timestamp em modo simulação)
-        if self.modo_simulacao and hasattr(self.exchange_api, 'get_barra_atual'):
-            # Modo simulação: obter dados completos da barra (timestamp + OHLCV)
-            barra = self.exchange_api.get_barra_atual(self.config['par'])
-            preco_atual = Decimal(str(barra['close']))
-            # CAPTURAR TIMESTAMP SIMULADO
-            self.tempo_simulado_atual = barra['timestamp']
-        else:
-            # Modo tempo real: obter apenas o preço
-            preco_atual = Decimal(str(self.exchange_api.get_preco_atual(self.config['par'])))
 
         # ═══════════════════════════════════════════════════════════════════
         # VERIFICAÇÃO E ATUALIZAÇÃO DE STOP LOSS E TRAILING STOP LOSS
@@ -1483,7 +1512,6 @@ class BotWorker:
                 if not self.modo_simulacao: time.sleep(pausa_apos_operacao)
                 return
 
-        # ═══════════════════════════════════════════════════════════════════
         # ESTRATÉGIA GIRO RÁPIDO (apenas se ativa)
         # ═══════════════════════════════════════════════════════════════════
         if self.estrategia_ativa in ['giro', 'ambas']:

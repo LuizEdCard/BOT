@@ -1,46 +1,47 @@
 {
-  "_comentario": "Configuração de PRODUÇÃO para XRP/USDT na KuCoin",
+  "_comentario": "Configuração de PRODUÇÃO para ADA/USDT na Binance",
 
-  "nome_instancia": "XRP",
-  "exchange": "kucoin",
-  "par": "XRP-USDT",
-  
+  "nome_instancia": "ADA",
+  "exchange": "binance",
+  "par": "ADA/USDT",
+
   "_secao_api": "Chaves de API (lidas do arquivo .env)",
-  "api_key_env": "KUCOIN_API_KEY",
-  "api_secret_env": "KUCOIN_API_SECRET",
-  "api_passphrase_env": "KUCOIN_API_PASSPHRASE",
+  "api_key_env": "BINANCE_API_KEY",
+  "api_secret_env": "BINANCE_API_SECRET",
 
   "_secao_identificacao": "Identificação e persistência",
-  "DATABASE_PATH": "dados/kucoin_trades.db",
-  "BACKUP_DIR": "dados/backups/xrp_kucoin",
-  "STATE_FILE_PATH": "dados/kucoin_state.json",
+  "DATABASE_PATH": "dados/binance_trades.db",
+  "BACKUP_DIR": "dados/backups/ada_binance",
+  "STATE_FILE_PATH": "dados/binance_state.json",
   "AMBIENTE": "PRODUCAO",
 
   "_secao_capital": "Gestão de capital",
-  "CAPITAL_INICIAL": 50.0,
+  "CAPITAL_INICIAL": 180.0,
   "PERCENTUAL_RESERVA": 8,
   "VALOR_MINIMO_ORDEM": 5.0,
 
   "_secao_timing": "Controles de tempo e estratégia",
   "COOLDOWN_GLOBAL_APOS_COMPRA_MINUTOS": 15,
-  "PERCENTUAL_MINIMO_MELHORA_PM": 1.5,
+  "PERCENTUAL_MINIMO_MELHORA_PM": 1.25,
   "usar_filtro_rsi": false,
   "rsi_limite_compra": 40,
   "rsi_timeframe": "1h",
 
   "_secao_risco": "Gestão de risco",
   "GESTAO_DE_RISCO": {
-    "exposicao_maxima_percentual_capital": 90.0,
+    "exposicao_maxima_percentual_capital": 85.0,
     "compras_de_oportunidade_extrema": [
-      { "tipo": "absoluto", "preco_alvo": 2.0, "percentual_capital_usar": 25 },
-      { "tipo": "absoluto", "preco_alvo": 1.8, "percentual_capital_usar": 25 },
-      { "tipo": "absoluto", "preco_alvo": 1.5, "percentual_capital_usar": 50 }
+      { "tipo": "absoluto", "preco_alvo": 0.60, "percentual_capital_usar": 25 },
+      { "tipo": "absoluto", "preco_alvo": 0.55, "percentual_capital_usar": 25 },
+      { "tipo": "absoluto", "preco_alvo": 0.50, "percentual_capital_usar": 50 }
     ]
   },
 
-  "_secao_aportes": "Sistema de aportes automáticos",
+  "_secao_aportes": "Sistema de aportes automáticos (BRL)",
   "APORTES": {
-    "habilitado": false
+    "habilitado": true,
+    "intervalo_verificacao_minutos": 30,
+    "valor_minimo_brl_para_converter": 50.0
   },
   
   "_secao_estrategias": "Seleção de estratégias ativas",
@@ -54,19 +55,19 @@
     {
       "nivel": 1,
       "gatilho_distancia_sma": 5,
-      "percentual_capital_usar": 15,
+      "percentual_capital_usar": 10,
       "intervalo_horas": 24
     },
     {
       "nivel": 2,
       "gatilho_distancia_sma": 10,
-      "percentual_capital_usar": 20,
+      "percentual_capital_usar": 15,
       "intervalo_horas": 48
     },
     {
       "nivel": 3,
       "gatilho_distancia_sma": 15,
-      "percentual_capital_usar": 30,
+      "percentual_capital_usar": 25,
       "intervalo_horas": 72
     }
   ],

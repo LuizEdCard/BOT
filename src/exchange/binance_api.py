@@ -336,6 +336,60 @@ class BinanceAPI(ExchangeAPI):
             logger.erro_api(f'obter_info_simbolo/{simbolo}', str(e))
             return None
 
+    def fetch_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str,
+        start_date: str,
+        end_date: str
+    ) -> List[List]:
+        """
+        Busca dados OHLCV (Open, High, Low, Close, Volume) históricos.
+        
+        Args:
+            symbol: Par de moedas (ex: 'ADA/USDT')
+            timeframe: Intervalo de tempo (ex: '1h', '4h', '1d')
+            start_date: Data de início no formato 'YYYY-MM-DD'
+            end_date: Data de fim no formato 'YYYY-MM-DD'
+            
+        Returns:
+            Lista de listas com dados OHLCV: [timestamp, open, high, low, close, volume]
+        """
+        from datetime import datetime
+        
+        # Converter datas para timestamps em milissegundos
+        start_timestamp = int(datetime.strptime(start_date, '%Y-%m-%d').timestamp() * 1000)
+        end_timestamp = int(datetime.strptime(end_date, '%Y-%m-%d').timestamp() * 1000)
+        
+        all_klines = []
+        current_start = start_timestamp
+        
+        # Binance limita a 1000 candles por requisição, então precisamos fazer múltiplas requisições
+        while current_start < end_timestamp:
+            klines = self.obter_klines(
+                simbolo=symbol,
+                intervalo=timeframe,
+                limite=1000,
+                inicio=current_start,
+                fim=end_timestamp
+            )
+            
+            if not klines:
+                break
+                
+            all_klines.extend(klines)
+            
+            # Atualizar o timestamp de início para a próxima requisição
+            # Usar o timestamp do último candle + 1ms
+            current_start = klines[-1][0] + 1
+            
+            # Se recebemos menos de 1000 candles, chegamos ao fim
+            if len(klines) < 1000:
+                break
+        
+        # Retornar apenas os primeiros 6 elementos de cada candle (timestamp, open, high, low, close, volume)
+        return [[k[0], k[1], k[2], k[3], k[4], k[5]] for k in all_klines]
+
     def obter_klines(
         self,
         simbolo: str,

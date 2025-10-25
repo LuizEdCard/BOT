@@ -72,7 +72,6 @@ class StrategySwingTrade:
         self.estrategia_config = config.get('estrategia_giro_rapido', {})
 
         if not self.habilitado:
-            self.logger.info("📈 Estratégia de Giro Rápido DESABILITADA")
             return
 
         # Parâmetros de alocação
@@ -80,7 +79,7 @@ class StrategySwingTrade:
 
         # Parâmetros de timeframe
         self.timeframe = self.estrategia_config.get('timeframe', '15m')
-        self.lookback_periodos = int(self.estrategia_config.get('lookback_periodos_compra', 24))
+        self.lookback_periodos = int(self.estrategia_config.get('lookback_periodos_compra', 96))
 
         # Parâmetros de compra
         self.gatilho_compra_pct = Decimal(str(self.estrategia_config.get('gatilho_compra_pct', 2.0)))
@@ -89,7 +88,7 @@ class StrategySwingTrade:
         self.meta_lucro_pct = Decimal(str(self.estrategia_config.get('meta_lucro_pct', 3.5)))
 
         # Parâmetros de Stop Loss Inicial (lido diretamente da raiz)
-        self.stop_loss_inicial_pct = Decimal(str(self.estrategia_config.get('stop_loss_inicial_pct', 1.5)))
+        self.stop_loss_inicial_pct = Decimal(str(self.estrategia_config.get('stop_loss_inicial_pct', 2.5)))
 
         # Parâmetros de Trailing Stop Loss (usando subseção protecao_lucro)
         protecao = self.estrategia_config.get('protecao_lucro', {})
@@ -106,39 +105,9 @@ class StrategySwingTrade:
         # Configurar alocação na gestão de capital
         self.gestao_capital.configurar_alocacao_giro_rapido(self.alocacao_capital_pct)
 
-        self.logger.info("📈 Estratégia de Giro Rápido HABILITADA")
-        self.logger.info(f"   Timeframe: {self.timeframe} (lookback: {self.lookback_periodos} períodos)")
-        self.logger.info(f"   Alocação: {self.alocacao_capital_pct}% do capital livre")
-        self.logger.info(f"   Gatilho compra: queda de {self.gatilho_compra_pct}%")
-        self.logger.info(f"   Meta lucro: {self.meta_lucro_pct}%")
-        self.logger.info(f"   Stop Loss inicial: {self.stop_loss_inicial_pct}%")
-        self.logger.info(f"   TSL ativação: {self.trailing_stop_ativacao_pct}% | distância: {self.trailing_stop_distancia_pct}%")
+        # IMPORTANTE: A inicialização com histórico foi movida para a primeira chamada de
+        # 'verificar_oportunidade' para garantir que só ocorra se a estratégia for usada.
 
-        # IMPORTANTE: Inicializar preço de referência com histórico IMEDIATAMENTE
-        # Isso evita que o primeiro preço consultado seja usado como referência
-        # antes de buscar o histórico
-        self.logger.info("🔍 Inicializando preço de referência com histórico ao construir estratégia...")
-        self.logger.info(f"   🔧 exchange_api disponível: {self.exchange_api is not None}")
-        self.logger.info(f"   🔧 Tipo da exchange_api: {type(self.exchange_api).__name__ if self.exchange_api else 'None'}")
-
-        if self.exchange_api:
-            try:
-                par_config = self.config.get('par', 'XRP/USDT')
-                self.logger.info(f"   🔧 Par configurado: {par_config}")
-
-                preco_inicial = Decimal(str(self.exchange_api.get_preco_atual(par_config)))
-                self.logger.info(f"   🔧 Preço inicial obtido: ${preco_inicial:.6f}")
-
-                self._inicializar_preco_referencia_com_historico(preco_inicial)
-                self._inicializado_com_historico = True
-                self.logger.info(f"   ✅ Inicialização com histórico CONCLUÍDA no construtor")
-            except Exception as e:
-                self.logger.error(f"❌ Erro ao inicializar histórico no construtor: {e}")
-                import traceback
-                self.logger.error(f"Traceback completo:\n{traceback.format_exc()}")
-                self.logger.warning("⚠️ Inicialização com histórico será feita na primeira verificação")
-        else:
-            self.logger.warning("⚠️ exchange_api NÃO está disponível - histórico NÃO será inicializado")
 
     def verificar_oportunidade(self, preco_atual: Decimal, tempo_atual: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """

@@ -6,4 +6,4 @@ colorama
 psutil
 pandas
 pandas-ta
-pandas-ta
+questionary

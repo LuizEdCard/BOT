@@ -180,6 +180,16 @@ class PositionManager:
             with self.db._conectar() as conn:
                 cursor = conn.cursor()
 
+                # Verificar se a tabela existe antes de tentar consultar
+                cursor.execute("""
+                    SELECT name FROM sqlite_master 
+                    WHERE type='table' AND name='ordens'
+                """)
+                
+                if not cursor.fetchone():
+                    logger.debug("📊 Tabela 'ordens' ainda não existe")
+                    return []
+
                 cursor.execute("""
                     SELECT
                         id, tipo, par, quantidade, preco, valor_total,

@@ -65,12 +65,13 @@ class StrategyDCA:
         self.percentual_minimo_melhora_pm = Decimal(str(config.get('PERCENTUAL_MINIMO_MELHORA_PM', 2.0)))
         self.gestao_risco = config.get('GESTAO_DE_RISCO', {})
         
-        # Configuração do filtro RSI (opcional)
-        self.usar_filtro_rsi = bool(config.get('usar_filtro_rsi', True))
-        
+        # Configuração do filtro RSI (opcional) - por compatibilidade, padrão = False
+        self.usar_filtro_rsi = bool(config.get('usar_filtro_rsi', False))
+
         # Limite de RSI para compras - só é obrigatório se o filtro estiver ativo
         if self.usar_filtro_rsi:
-            self.limite_rsi = Decimal(str(config['rsi_limite_compra']))
+            # Usar get com fallback para evitar KeyError em configs sem chave
+            self.limite_rsi = Decimal(str(config.get('rsi_limite_compra', 35)))
             # Timeframe do RSI - CONFIGURÁVEL (padrão: 4h)
             self.rsi_timeframe = config.get('rsi_timeframe', '4h')
         else:
@@ -82,12 +83,6 @@ class StrategyDCA:
         self.habilitado: bool = bool(
             self.config.get('ESTRATEGIAS', {}).get('dca', True)
         )
-
-        self.logger.debug(f"🎯 Estratégia DCA inicializada com {len(self.degraus_compra)} degraus")
-        if self.usar_filtro_rsi:
-            self.logger.debug(f"   📈 Filtro RSI: ATIVO (limite: {self.limite_rsi}, timeframe: {self.rsi_timeframe})")
-        else:
-            self.logger.debug(f"   ⚠️ Filtro RSI: DESABILITADO")
     
     def verificar_oportunidade(
         self, 
@@ -130,11 +125,19 @@ class StrategyDCA:
             degrau_ativo = self._encontrar_degrau_ativo(distancia_sma)
             if not degrau_ativo:
                 self.logger.debug(f"📊 Nenhum degrau ativo para queda de {distancia_sma:.2f}%")
+                # Log adicional: listar gatilhos configurados para ajudar no debug
+                try:
+                    gatilhos = [float(d.get('gatilho_distancia_sma', 0)) for d in self.degraus_compra]
+                    self.logger.debug(f"🔎 Degraus configurados (gatilhos SMA %): {gatilhos}")
+                except Exception:
+                    pass
                 return None
 
             # Calcula e adiciona a quantidade_ada ao degrau_ativo
             percentual_capital = Decimal(str(degrau_ativo['percentual_capital_usar']))
-            capital_para_usar = self.gestao_capital.saldo_usdt * (percentual_capital / Decimal('100'))
+            # CORREÇÃO: Usar o capital disponível para a carteira 'acumulacao', não o saldo USDT total
+            capital_disponivel_acumulacao = self.gestao_capital.calcular_capital_disponivel('acumulacao')
+            capital_para_usar = capital_disponivel_acumulacao * (percentual_capital / Decimal('100'))
             degrau_ativo['quantidade_ada'] = capital_para_usar / preco_atual
 
             # Verificação de RSI - SÓ EXECUTA SE O FILTRO ESTIVER ATIVO
@@ -156,12 +159,22 @@ class StrategyDCA:
 
             
             # Verificar dupla-condição: SMA + melhora do preço médio (exceto em modo crash)
-            if not modo_crash and not self._verificar_dupla_condicao(degrau_ativo, preco_atual, distancia_sma):
-                return None
+            dupla_ok = True
+            if not modo_crash:
+                dupla_ok = self._verificar_dupla_condicao(degrau_ativo, preco_atual, distancia_sma)
+                if not dupla_ok:
+                    # Log detalhado do motivo (o método já notifica via _notificar_compra_bloqueada)
+                    preco_medio_atual = self.position_manager.get_preco_medio()
+                    self.logger.debug(
+                        f"❌ Dupla-condição NÃO atendida para degrau {degrau_ativo.get('nivel')} - Preço atual: {preco_atual:.6f}, PM: {preco_medio_atual}"
+                    )
+                    return None
             
             # Verificar cooldowns (global + por degrau) - passa tempo_atual para backtesting
             pode_comprar, motivo_bloqueio = self._verificar_cooldowns(degrau_ativo, tempo_atual)
             if not pode_comprar:
+                # Log do motivo do cooldown para facilitar debug em backtests
+                self.logger.debug(f"🕒 Compra bloqueada por cooldown (degrau {degrau_ativo.get('nivel')}): {motivo_bloqueio}")
                 self._gerenciar_notificacao_bloqueio(degrau_ativo['nivel'], motivo_bloqueio)
                 return None
             
@@ -169,7 +182,8 @@ class StrategyDCA:
             quantidade_ada = Decimal(str(degrau_ativo['quantidade_ada']))
             valor_ordem = quantidade_ada * preco_atual
             
-            pode_comprar_capital, motivo = self.gestao_capital.pode_comprar(valor_ordem)
+            # IMPORTANTE: Passar 'acumulacao' explicitamente para validar capital da carteira correta
+            pode_comprar_capital, motivo = self.gestao_capital.pode_comprar(valor_ordem, carteira='acumulacao')
             if not pode_comprar_capital:
                 self.logger.debug(f"💰 Capital insuficiente para degrau {degrau_ativo['nivel']}: {motivo}")
                 return None
@@ -179,6 +193,7 @@ class StrategyDCA:
             
             oportunidade = {
                 'tipo': 'dca',
+                'carteira': 'acumulacao',  # Identificar explicitamente a carteira
                 'degrau': degrau_ativo['nivel'],
                 'quantidade': quantidade_ada,
                 'preco_atual': preco_atual,
@@ -446,13 +461,13 @@ class StrategyDCA:
         # VERIFICAÇÃO 2: COOLDOWN POR DEGRAU (intervalo específico do degrau)
         chave_degrau = f'ultima_compra_degrau_{nivel_degrau}_ts'
         timestamp_degrau_str = self.state.get_state(chave_degrau)
-        
+
         if timestamp_degrau_str:
             ultima_compra_degrau = datetime.fromisoformat(timestamp_degrau_str)
             tempo_desde_compra_degrau = agora - ultima_compra_degrau
             intervalo_horas = Decimal(str(degrau['intervalo_horas']))
             horas_decorridas = Decimal(str(tempo_desde_compra_degrau.total_seconds() / 3600))
-            
+
             if horas_decorridas < intervalo_horas:
                 horas_restantes = float(intervalo_horas - horas_decorridas)
                 motivo = f"cooldown_degrau:{horas_restantes:.1f}h"
@@ -532,9 +547,9 @@ class StrategyDCA:
             )
             
             self.notifier.enviar_alerta(titulo, mensagem)
-            
-            # Marcar que já notificou para esta chave (com expiração de 1h)
-            self.state.set_state(chave_bloqueio, True, ttl_seconds=3600)
+
+            # Marcar que já notificou para esta chave
+            self.state.set_state(chave_bloqueio, True)
     
     def registrar_compra_executada(
         self, 

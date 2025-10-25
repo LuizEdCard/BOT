@@ -87,6 +87,7 @@ class Logger:
         self.logger = logging.getLogger(nome)
         self.logger.setLevel(logging.DEBUG)  # Nível mais baixo, filtros nos handlers
         self.logger.handlers.clear()  # Limpar handlers existentes
+        self.logger.propagate = False  # CORREÇÃO BUG 3: Impede logs duplicados
 
         # Handler para console
         if console:

@@ -26,6 +26,7 @@ class StrategySell:
         config: Dict[str, Any],
         position_manager: PositionManager,
         state_manager: StateManager,
+        carteira: str = 'acumulacao',
         logger=None
     ):
         """
@@ -35,6 +36,7 @@ class StrategySell:
             config: Configurações da estratégia
             position_manager: Gerenciador de posições
             state_manager: Gerenciador de estado
+            carteira: Nome da carteira ('acumulacao' ou 'giro_rapido')
             logger: Logger contextual (opcional)
         """
         # Logger contextual (fallback para logger global se não fornecido)
@@ -47,11 +49,19 @@ class StrategySell:
         self.config = config
         self.position_manager = position_manager
         self.state = state_manager
+        self.carteira = carteira
         
         # Configurações extraídas
         self.metas_venda = config.get('METAS_VENDA', [])
         self.vendas_seguranca = config.get('VENDAS_DE_SEGURANCA', [])
         self.valor_minimo_ordem = Decimal(str(config.get('VALOR_MINIMO_ORDEM', 5.0)))
+        # Fallback de venda simples (quando nenhuma meta é configurada ou atingida)
+        # Permite ativar uma meta de venda simples para validação de buy+sell
+        self.sell_fallback_enabled = bool(config.get('SELL_FALLBACK_ENABLED', False))
+        # Percentual de lucro para acionar o fallback (ex: 3 = 3%)
+        self.sell_fallback_percentual = Decimal(str(config.get('SELL_FALLBACK_PERCENTUAL', 3)))
+        # Percentual da posição a vender quando o fallback aciona (ex: 100 = vende tudo)
+        self.sell_fallback_percentual_venda = Decimal(str(config.get('SELL_FALLBACK_PERCENTUAL_VENDA', 100)))
         
         # Estado do High-Water Mark
         self.high_water_mark_profit: Decimal = Decimal('0')
@@ -78,12 +88,12 @@ class StrategySell:
         """
         try:
             # Verificar se há posição para vender
-            if not self.position_manager.tem_posicao():
-                self.logger.debug("📊 Sem posição para vender")
+            if not self.position_manager.tem_posicao(self.carteira):
+                self.logger.debug(f"📊 Sem posição para vender na carteira '{self.carteira}'")
                 return None
-            
+
             # Calcular lucro atual
-            lucro_atual = self.position_manager.calcular_lucro_atual(preco_atual)
+            lucro_atual = self.position_manager.calcular_lucro_atual(preco_atual, self.carteira)
             if lucro_atual is None or lucro_atual <= 0:
                 self.logger.debug(f"📊 Sem lucro para vender (atual: {lucro_atual:.2f}%)" if lucro_atual else "📊 Sem lucro calculável")
                 return None
@@ -101,6 +111,34 @@ class StrategySell:
             if oportunidade_seguranca:
                 return oportunidade_seguranca
             
+            # PRIORIDADE 3: Fallback de venda simples (útil para testes)
+            if self.sell_fallback_enabled:
+                try:
+                    if lucro_atual >= self.sell_fallback_percentual:
+                        self.logger.info(f"🔎 Fallback de venda ativado - lucro atual {lucro_atual:.2f}% >= {self.sell_fallback_percentual}%")
+                        quantidade_total = self.position_manager.get_quantidade_total(self.carteira)
+                        percentual_venda = self.sell_fallback_percentual_venda / Decimal('100')
+                        quantidade_venda = quantidade_total * percentual_venda
+                        quantidade_venda = self._arredondar_quantidade(quantidade_venda)
+                        valor_ordem = quantidade_venda * preco_atual
+
+                        if self._validar_ordem_minima(valor_ordem, quantidade_venda):
+                            return {
+                                'tipo': 'meta_fallback',
+                                'lucro_percentual_meta': self.sell_fallback_percentual,
+                                'lucro_percentual_atual': lucro_atual,
+                                'percentual_venda': float(self.sell_fallback_percentual_venda),
+                                'quantidade_venda': quantidade_venda,
+                                'preco_atual': preco_atual,
+                                'valor_ordem': valor_ordem,
+                                'motivo': f"Fallback Sell {self.sell_fallback_percentual}%",
+                                'reset_hwm': True
+                            }
+                        else:
+                            self.logger.warning(f"⚠️ Fallback de venda acionado mas ordem abaixo do mínimo: ${valor_ordem:.2f}")
+                except Exception as e:
+                    self.logger.error(f"❌ Erro ao avaliar fallback de venda: {e}")
+
             # Nenhuma oportunidade encontrada
             return None
             
@@ -120,40 +158,45 @@ class StrategySell:
             Dict com oportunidade de meta fixa ou None
         """
         # Ordenar metas por lucro percentual (maior para menor)
+        # Suportar ambas as chaves: 'gatilho_lucro_pct' (padrão) ou 'lucro_percentual' (legado)
         metas_ordenadas = sorted(
             self.metas_venda,
-            key=lambda x: x['lucro_percentual'],
+            key=lambda x: Decimal(str(x.get('gatilho_lucro_pct', x.get('lucro_percentual', 0)))),
             reverse=True
         )
         
         # Verificar se alguma meta fixa foi atingida
         for meta in metas_ordenadas:
-            meta_lucro_pct = Decimal(str(meta['lucro_percentual']))
-            
+            # Suportar ambas as chaves: 'gatilho_lucro_pct' (padrão) ou 'lucro_percentual' (legado)
+            meta_lucro_pct = Decimal(str(meta.get('gatilho_lucro_pct', meta.get('lucro_percentual', 0))))
+
             if lucro_atual >= meta_lucro_pct:
-                self.logger.info(f"🎯 Meta fixa {meta['meta']} atingida ({meta_lucro_pct}%)")
-                
                 # Calcular quantidade a vender
-                quantidade_total = self.position_manager.get_quantidade_total()
-                percentual_venda = Decimal(str(meta['percentual_venda'])) / Decimal('100')
+                quantidade_total = self.position_manager.get_quantidade_total(self.carteira)
+                # Usar valor padrão (100%) se percentual_venda não estiver definido
+                percentual_venda_valor = meta.get('percentual_venda', 100)
+                percentual_venda = Decimal(str(percentual_venda_valor)) / Decimal('100')
                 quantidade_venda = quantidade_total * percentual_venda
-                
+
                 # Arredondar para 0.1 (step size ADA)
                 quantidade_venda = self._arredondar_quantidade(quantidade_venda)
                 valor_ordem = quantidade_venda * preco_atual
-                
-                # Validar valor mínimo
+
+                # Validar valor mínimo ANTES de registrar a meta como atingida
                 if not self._validar_ordem_minima(valor_ordem, quantidade_venda):
-                    self.logger.warning(f"⚠️ Meta {meta['meta']} atingida mas ordem abaixo do mínimo: ${valor_ordem:.2f}")
+                    self.logger.debug(f"🔍 Meta {meta['meta']} atingida ({meta_lucro_pct}%) mas ordem ${valor_ordem:.2f} abaixo do mínimo - pulando")
                     continue
-                
+
+                # Só log a meta quando ela vai ser REALMENTE EXECUTADA
+                self.logger.info(f"🎯 Meta fixa {meta['meta']} atingida ({meta_lucro_pct}%)")
+
                 return {
                     'tipo': 'meta_fixa',
                     'meta': meta['meta'],
                     'meta_numero': meta['meta'],
                     'lucro_percentual_meta': meta_lucro_pct,
                     'lucro_percentual_atual': lucro_atual,
-                    'percentual_venda': meta['percentual_venda'],
+                    'percentual_venda': percentual_venda_valor,
                     'quantidade_venda': quantidade_venda,
                     'preco_atual': preco_atual,
                     'valor_ordem': valor_ordem,
@@ -177,8 +220,8 @@ class StrategySell:
         """
         if not self.vendas_seguranca:
             return None
-        
-        quantidade_total = self.position_manager.get_quantidade_total()
+
+        quantidade_total = self.position_manager.get_quantidade_total(self.carteira)
         
         for zona in self.vendas_seguranca:
             nome_zona = zona['nome']
@@ -345,9 +388,9 @@ class StrategySell:
         """
         if not self.capital_para_recompra:
             return None  # Nenhuma recompra pendente
-        
+
         # Calcular lucro atual (se houver posição)
-        lucro_atual = self.position_manager.calcular_lucro_atual(preco_atual)
+        lucro_atual = self.position_manager.calcular_lucro_atual(preco_atual, self.carteira)
         
         if lucro_atual is None:
             # Sem posição - não faz sentido recomprar sem preço médio

@@ -101,6 +101,28 @@ class GestaoCapital:
         simbolo = "+" if diferenca >= 0 else ""
         logger.debug(f"💰 Saldo USDT atualizado: ${saldo_anterior:.2f} → ${novo_saldo:.2f} ({simbolo}{diferenca:.2f})")
 
+    def set_saldo_usdt_simulado(self, novo_saldo: Decimal, carteira: str):
+        """
+        Atualiza o saldo USDT interno da carteira especificada diretamente.
+        
+        IMPORTANTE: Este método é específico para modo simulação e permite
+        sincronização do saldo USDT após operações simuladas.
+        
+        Args:
+            novo_saldo: Novo saldo USDT a ser definido
+            carteira: Nome da carteira ('acumulacao' ou 'giro_rapido')
+        """
+        if not self.modo_simulacao:
+            logger.warning("⚠️ Tentativa de usar set_saldo_usdt_simulado fora do modo simulação - ignorando")
+            return
+        
+        saldo_anterior = self.saldo_usdt
+        self.saldo_usdt = novo_saldo
+        
+        diferenca = novo_saldo - saldo_anterior
+        simbolo = "+" if diferenca >= 0 else ""
+        logger.debug(f"💰 Saldo USDT atualizado [{carteira}]: ${saldo_anterior:.2f} → ${novo_saldo:.2f} ({simbolo}{diferenca:.2f})")
+
     def atualizar_saldos(self, saldo_usdt: Decimal, valor_posicao_ada: Decimal = Decimal('0'), carteira: str = 'acumulacao'):
         """
         Atualizar saldos para recálculo
@@ -149,28 +171,52 @@ class GestaoCapital:
         """
         Calcula capital disponível para trading por carteira
 
+        Em modo simulação, usa o saldo específico da carteira (já dividido na SimulatedExchangeAPI).
+        Em modo real, calcula a divisão dinamicamente com base no saldo total.
+
         Args:
             carteira: Nome da carteira ('acumulacao' ou 'giro_rapido')
 
         Returns:
             Capital disponível em USDT para a carteira especificada
         """
+        # Em modo simulação, cada carteira tem seu próprio saldo separado
+        # Não aplicamos reserva por carteira, apenas para o total
         reserva = self.calcular_reserva_obrigatoria()
+
+        # IMPORTANTE: Em modo simulação, o saldo_usdt já é o saldo TOTAL
+        # A SimulatedExchangeAPI mantém os saldos separados em saldos_por_carteira
         saldo_livre = self.saldo_usdt - reserva
 
         if saldo_livre <= 0:
             return Decimal('0')
 
-        if carteira == 'giro_rapido':
-            # Giro rápido usa um percentual do saldo livre
-            return saldo_livre * (self.alocacao_giro_rapido_pct / Decimal('100'))
-        elif carteira == 'acumulacao':
-            # Acumulação usa o restante do saldo livre
-            saldo_giro_rapido = saldo_livre * (self.alocacao_giro_rapido_pct / Decimal('100'))
-            return saldo_livre - saldo_giro_rapido
+        # Em modo simulação com carteiras separadas:
+        # Não recalculamos a divisão aqui - o saldo já está dividido na API
+        # Portanto, retornamos o saldo livre (sem aplicar percentual novamente)
+        # A divisão 80/20 já foi feita na inicialização da SimulatedExchangeAPI
+
+        if self.modo_simulacao:
+            # Em modo simulação: cada carteira tem seu próprio saldo
+            # Não aplicamos percentuais aqui - eles já foram aplicados na API
+            if carteira == 'giro_rapido':
+                # 20% do capital total
+                return self.saldo_usdt * (self.alocacao_giro_rapido_pct / Decimal('100'))
+            elif carteira == 'acumulacao':
+                # 80% do capital total (100% - 20%)
+                return self.saldo_usdt * ((Decimal('100') - self.alocacao_giro_rapido_pct) / Decimal('100'))
         else:
-            logger.warning(f"⚠️ Carteira '{carteira}' desconhecida. Retornando 0.")
-            return Decimal('0')
+            # Em modo real: calcular dividindo o saldo livre
+            if carteira == 'giro_rapido':
+                # Giro rápido usa um percentual do saldo livre
+                return saldo_livre * (self.alocacao_giro_rapido_pct / Decimal('100'))
+            elif carteira == 'acumulacao':
+                # Acumulação usa o restante do saldo livre
+                saldo_giro_rapido = saldo_livre * (self.alocacao_giro_rapido_pct / Decimal('100'))
+                return saldo_livre - saldo_giro_rapido
+
+        logger.warning(f"⚠️ Carteira '{carteira}' desconhecida. Retornando 0.")
+        return Decimal('0')
 
     def get_alocacao_percentual_ada(self, carteira: str = 'acumulacao') -> Decimal:
         """
