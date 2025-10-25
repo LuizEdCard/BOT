@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Strategy Swing Trade - Estratégia de Giro Rápido
-Focada em capitalizar pequenas oscilações de preço com proteção de lucro
+Strategy Swing Trade - Estratégia de Giro Rápido (RSI + Stop Promovido)
+Focada em capitalizar oscilações rápidas com proteção inteligente de Stop Loss
 """
 
 from decimal import Decimal
@@ -14,22 +14,25 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.core.position_manager import PositionManager
 from src.core.gestao_capital import GestaoCapital
+from src.core.analise_tecnica import AnaliseTecnica
 
 
 class StrategySwingTrade:
     """
-    Estratégia de Swing Trade (Giro Rápido)
+    Estratégia de Swing Trade (Giro Rápido) - Versão 2.0
 
     Características:
     - Opera com capital separado da carteira de acumulação
-    - Compra em quedas de preço (gatilho_compra_pct)
-    - Meta de lucro principal (meta_lucro_pct)
-    - Proteção de lucro parcial com trailing stop
+    - Entrada: RSI < 30 (sobrevenda)
+    - Saída: Sistema "Stop Promovido"
+      * Fase 1: Stop Loss inicial (proteção)
+      * Fase 2: Promoção para Trailing Stop quando atinge breakeven (0%)
+      * Fase 3: TSL segue o preço com distância configurada
 
     Regras:
-    - Compra: Preço caiu X% de uma máxima recente
-    - Venda: Lucro atingiu meta OU proteção de lucro ativada
-    - Proteção: Se lucro >= ativacao_pct, vende se cair venda_reversao_pct
+    - Compra: RSI cai abaixo do limite configurado
+    - Venda: Stop Loss disparado OU Trailing Stop disparado
+    - Proteção: Stop promovido de SL → TSL no ponto de breakeven
     """
 
     def __init__(
@@ -37,6 +40,7 @@ class StrategySwingTrade:
         config: Dict[str, Any],
         position_manager: PositionManager,
         gestao_capital: GestaoCapital,
+        analise_tecnica: AnaliseTecnica,
         logger=None,
         notifier=None,
         exchange_api=None
@@ -48,9 +52,10 @@ class StrategySwingTrade:
             config: Configuração completa do bot
             position_manager: Gerenciador de posições
             gestao_capital: Gerenciador de capital
+            analise_tecnica: Calculador de indicadores técnicos
             logger: Logger contextual (opcional)
             notifier: Instância do Notifier para notificações
-            exchange_api: API da exchange para buscar histórico de preços (opcional)
+            exchange_api: API da exchange para buscar dados (opcional)
         """
         # Logger contextual (fallback para logger global se não fornecido)
         if logger:
@@ -62,52 +67,46 @@ class StrategySwingTrade:
         self.config = config
         self.position_manager = position_manager
         self.gestao_capital = gestao_capital
+        self.analise_tecnica = analise_tecnica
         self.notifier = notifier
         self.exchange_api = exchange_api
 
-        # Verificação de habilitação da estratégia usando flag normalizado
+        # Verificação de habilitação da estratégia
         self.habilitado = bool(config.get('ESTRATEGIAS', {}).get('giro_rapido', False))
-        
-        # Configuração da estratégia (fallback para formato antigo)
-        self.estrategia_config = config.get('estrategia_giro_rapido', {})
 
         if not self.habilitado:
             return
 
+        # Configuração da estratégia
+        self.estrategia_config = config.get('estrategia_giro_rapido', {})
+
         # Parâmetros de alocação
         self.alocacao_capital_pct = Decimal(str(self.estrategia_config.get('alocacao_capital_pct', 20)))
 
-        # Parâmetros de timeframe
-        self.timeframe = self.estrategia_config.get('timeframe', '15m')
-        self.lookback_periodos = int(self.estrategia_config.get('lookback_periodos_compra', 96))
+        # ═══════════════════════════════════════════════════════════════
+        # PARÂMETROS DE ENTRADA (RSI)
+        # ═══════════════════════════════════════════════════════════════
+        self.usar_filtro_rsi_entrada = self.estrategia_config.get('usar_filtro_rsi_entrada', True)
+        self.rsi_timeframe_entrada = self.estrategia_config.get('rsi_timeframe_entrada', '15m')
+        self.rsi_limite_compra = Decimal(str(self.estrategia_config.get('rsi_limite_compra', 30)))
 
-        # Parâmetros de compra
-        self.gatilho_compra_pct = Decimal(str(self.estrategia_config.get('gatilho_compra_pct', 2.0)))
-
-        # Parâmetros de venda
-        self.meta_lucro_pct = Decimal(str(self.estrategia_config.get('meta_lucro_pct', 3.5)))
-
-        # Parâmetros de Stop Loss Inicial (lido diretamente da raiz)
+        # ═══════════════════════════════════════════════════════════════
+        # PARÂMETROS DE SAÍDA (Stop Promovido)
+        # ═══════════════════════════════════════════════════════════════
         self.stop_loss_inicial_pct = Decimal(str(self.estrategia_config.get('stop_loss_inicial_pct', 2.5)))
-
-        # Parâmetros de Trailing Stop Loss (usando subseção protecao_lucro)
-        protecao = self.estrategia_config.get('protecao_lucro', {})
-        self.trailing_stop_ativacao_pct = Decimal(str(protecao.get('ativacao_pct', 2.0)))
-        self.trailing_stop_distancia_pct = Decimal(str(protecao.get('venda_reversao_pct', 0.8)))
+        self.trailing_stop_distancia_pct = Decimal(str(self.estrategia_config.get('trailing_stop_distancia_pct', 0.8)))
 
         # Estado interno
-        self.preco_referencia_maxima: Optional[Decimal] = None  # Máxima recente para gatilho de compra
-        self.ultima_compra_timestamp: Optional[float] = None  # Timestamp da última compra para cooldown
-        self.cooldown_segundos: int = self.estrategia_config.get('cooldown_compra_segundos', 60)  # Cooldown mínimo entre compras
-        self._inicializado_com_historico: bool = False  # Flag para saber se já buscou histórico
-        self.ultima_log_status: Optional[float] = None  # Timestamp do último log de status (throttle 1 min)
+        self.ultima_compra_timestamp: Optional[float] = None
+        self.cooldown_segundos: int = self.estrategia_config.get('cooldown_compra_segundos', 60)
+        self.ultima_log_status: Optional[float] = None
 
         # Configurar alocação na gestão de capital
         self.gestao_capital.configurar_alocacao_giro_rapido(self.alocacao_capital_pct)
 
-        # IMPORTANTE: A inicialização com histórico foi movida para a primeira chamada de
-        # 'verificar_oportunidade' para garantir que só ocorra se a estratégia for usada.
-
+        self.logger.info(f"✅ StrategySwingTrade inicializada (v2.0 - RSI + Stop Promovido)")
+        self.logger.info(f"   RSI Entrada: {self.rsi_limite_compra} | Timeframe: {self.rsi_timeframe_entrada}")
+        self.logger.info(f"   SL Inicial: {self.stop_loss_inicial_pct}% | TSL Distância: {self.trailing_stop_distancia_pct}%")
 
     def verificar_oportunidade(self, preco_atual: Decimal, tempo_atual: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """
@@ -124,9 +123,6 @@ class StrategySwingTrade:
             self.logger.debug("[SwingTrade] Estratégia DESABILITADA nas configurações")
             return None
 
-        # Atualizar preço de referência máxima
-        self._atualizar_preco_referencia(preco_atual)
-
         # Verificar se já tem posição
         tem_posicao = self.position_manager.tem_posicao('giro_rapido')
         quantidade = self.position_manager.get_quantidade_total('giro_rapido')
@@ -135,10 +131,11 @@ class StrategySwingTrade:
         import time
         agora_timestamp = tempo_atual if tempo_atual is not None else time.time()
         if self.ultima_log_status is None or (agora_timestamp - self.ultima_log_status) >= 60:
-            ref_max_str = f"${self.preco_referencia_maxima:.6f}" if self.preco_referencia_maxima else "None"
+            rsi_atual = self._obter_rsi_atual()
+            rsi_str = f"{rsi_atual:.2f}" if rsi_atual is not None else "N/A"
             self.logger.info(
                 f"📊 Giro Rápido | Preço: ${preco_atual:.6f} | "
-                f"Ref Máx: {ref_max_str} | "
+                f"RSI: {rsi_str} | "
                 f"Posição: {quantidade:.4f} | "
                 f"Status: {'COM posição' if tem_posicao else 'SEM posição'}"
             )
@@ -148,115 +145,95 @@ class StrategySwingTrade:
             # SEM POSIÇÃO: Verificar oportunidade de COMPRA
             return self._verificar_oportunidade_compra(preco_atual, agora_timestamp)
         else:
-            # COM POSIÇÃO: Verificar oportunidade de VENDA
+            # COM POSIÇÃO: Verificar oportunidade de VENDA (SL ou TSL)
             return self._verificar_oportunidade_venda(preco_atual)
 
-    def _atualizar_preco_referencia(self, preco_atual: Decimal):
+    def _obter_rsi_atual(self) -> Optional[Decimal]:
         """
-        Atualiza o preço de referência máxima para detectar quedas
+        Obtém o RSI atual do ativo no timeframe configurado
 
-        Args:
-            preco_atual: Preço atual do ativo
+        Returns:
+            Valor do RSI (0-100) ou None se não conseguir calcular
         """
-        if not self._inicializado_com_historico:
-            # Primeira inicialização OU após venda: usar HISTÓRICO se disponível
-            self._inicializar_preco_referencia_com_historico(preco_atual)
-            self._inicializado_com_historico = True
-        elif preco_atual > self.preco_referencia_maxima:
-            # Atualizar quando houver novo máximo
-            self.preco_referencia_maxima = preco_atual
-            self.logger.debug(f"📊 Preço referência máxima atualizado: ${preco_atual:.6f}")
-
-    def _inicializar_preco_referencia_com_historico(self, preco_atual: Decimal):
-        """
-        Inicializa preço de referência buscando o máximo dos últimos candles.
-
-        Se a API estiver disponível, busca os últimos 24 candles de 1 hora (24 horas)
-        e usa o preço máximo como referência. Isso evita perder oportunidades de compra
-        quando o bot inicia após uma queda de preço já ter ocorrido.
-
-        Args:
-            preco_atual: Preço atual como fallback
-        """
-        if self.exchange_api is None:
-            # Sem API: usar preço atual
-            self.preco_referencia_maxima = preco_atual
-            self.logger.warning(f"⚠️ Sem API disponível - inicializando com preço atual: ${preco_atual:.6f}")
-            return
-
         try:
-            # Buscar histórico com timeframe configurado
-            par = self.config.get('par', 'XRP/USDT')
-            # Manter o formato com barra para que a API da exchange converta corretamente
-            # (KuCoin converte / para -, Binance mantém sem separador)
+            if self.exchange_api is None:
+                return None
 
-            self.logger.info(f"🔍 Buscando histórico de preços para inicializar referência máxima...")
-            self.logger.info(f"   🔧 Par: {par}, Timeframe: {self.timeframe}, Lookback: {self.lookback_periodos} períodos")
-
+            par = self.config.get('par', 'ADA/USDT')
             klines = self.exchange_api.obter_klines(
                 simbolo=par,
-                intervalo=self.timeframe,
-                limite=self.lookback_periodos
+                intervalo=self.rsi_timeframe_entrada,
+                limite=14  # RSI padrão usa 14 períodos
             )
 
-            self.logger.info(f"   🔧 Klines recebidas: {len(klines) if klines else 0} candles")
+            if not klines or len(klines) < 14:
+                self.logger.debug(f"⚠️ Insuficientes klines para RSI ({len(klines) if klines else 0} < 14)")
+                return None
 
-            if klines and len(klines) > 0:
-                self.logger.info(f"   🔧 Primeiro candle: {klines[0][:5] if len(klines[0]) > 5 else klines[0]}")
-                self.logger.info(f"   🔧 Último candle: {klines[-1][:5] if len(klines[-1]) > 5 else klines[-1]}")
+            # Extrair preços de fechamento
+            closes = [Decimal(str(candle[4])) for candle in klines]
 
-                # Extrair preços máximos de cada candle
-                # Formato kline: [timestamp, open, high, low, close, volume, ...]
-                precos_maximos = [Decimal(str(candle[2])) for candle in klines]  # índice 2 = high
-                preco_maximo_historico = max(precos_maximos)
-
-                self.logger.info(f"   🔧 Preços máximos extraídos: {len(precos_maximos)} valores")
-                self.logger.info(f"   🔧 Máximo histórico calculado: ${preco_maximo_historico:.6f}")
-
-                self.preco_referencia_maxima = preco_maximo_historico
-
-                self.logger.info(f"✅ Preço de referência inicializado com HISTÓRICO:")
-                self.logger.info(f"   📊 Máxima dos últimos {len(klines)} candles ({self.timeframe}): ${preco_maximo_historico:.6f}")
-                self.logger.info(f"   📊 Preço atual: ${preco_atual:.6f}")
-
-                # Calcular se já está em queda
-                queda_atual = ((preco_maximo_historico - preco_atual) / preco_maximo_historico) * Decimal('100')
-                if queda_atual >= self.gatilho_compra_pct:
-                    self.logger.warning(f"⚠️ ATENÇÃO: Preço já caiu {queda_atual:.2f}% desde a máxima recente!")
-                    self.logger.warning(f"   🎯 Gatilho de compra PODE SER ATIVADO nesta verificação!")
-                else:
-                    self.logger.info(f"   📉 Queda atual: {queda_atual:.2f}% (gatilho: {self.gatilho_compra_pct}%)")
-            else:
-                # Fallback: usar preço atual
-                self.preco_referencia_maxima = preco_atual
-                self.logger.warning(f"⚠️ Histórico vazio - usando preço atual: ${preco_atual:.6f}")
-                self.logger.warning(f"   🔧 Klines retornadas: {klines}")
+            # Calcular RSI manualmente (versão simplificada)
+            rsi = self._calcular_rsi_manual(closes)
+            return rsi
 
         except Exception as e:
-            # Em caso de erro, usar preço atual como fallback
-            self.preco_referencia_maxima = preco_atual
-            self.logger.error(f"❌ Erro ao buscar histórico: {e}")
-            import traceback
-            self.logger.error(f"   🔧 Traceback detalhado:\n{traceback.format_exc()}")
-            self.logger.warning(f"⚠️ Usando preço atual como fallback: ${preco_atual:.6f}")
+            self.logger.debug(f"⚠️ Erro ao obter RSI: {e}")
+            return None
+
+    def _calcular_rsi_manual(self, closes: list, period: int = 14) -> Decimal:
+        """
+        Calcula RSI manualmente a partir de uma lista de preços de fechamento
+
+        Args:
+            closes: Lista de preços de fechamento
+            period: Período do RSI (padrão: 14)
+
+        Returns:
+            Valor do RSI (0-100) como Decimal
+        """
+        if len(closes) < period + 1:
+            return Decimal('50')  # RSI neutro se dados insuficientes
+
+        closes = [Decimal(str(c)) for c in closes]
+
+        # Calcular variações
+        variações = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+
+        # Separar ganhos e perdas
+        ganhos = [v if v > 0 else Decimal('0') for v in variações[-period:]]
+        perdas = [abs(v) if v < 0 else Decimal('0') for v in variações[-period:]]
+
+        # Média de ganhos e perdas
+        media_ganhos = sum(ganhos) / Decimal(period)
+        media_perdas = sum(perdas) / Decimal(period)
+
+        # Calcular RS e RSI
+        if media_perdas == 0:
+            rsi = Decimal('100') if media_ganhos > 0 else Decimal('50')
+        else:
+            rs = media_ganhos / media_perdas
+            rsi = Decimal('100') - (Decimal('100') / (Decimal('1') + rs))
+
+        return rsi
 
     def _verificar_oportunidade_compra(self, preco_atual: Decimal, tempo_atual: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """
         Verifica oportunidade de compra quando NÃO há posição
 
+        Lógica:
+        1. Verificar cooldown
+        2. Verificar RSI < limite
+        3. Calcular capital disponível
+        4. Registrar stop loss inicial
+
         Args:
             preco_atual: Preço atual do ativo
-            tempo_atual: Timestamp atual em segundos (opcional - para backtesting). Se None, usa time.time()
+            tempo_atual: Timestamp atual em segundos
 
         Returns:
             Dict com dados da oportunidade de compra ou None
         """
-        # Proteção adicional: se por algum motivo preco_referencia_maxima ainda for None,
-        # inicializar (não deveria acontecer pois _atualizar_preco_referencia já faz isso)
-        if self.preco_referencia_maxima is None:
-            self.logger.warning("⚠️ Preço de referência None em _verificar_oportunidade_compra (não deveria acontecer)")
-            self._inicializar_preco_referencia_com_historico(preco_atual)
-
         # VERIFICAR COOLDOWN: Evitar múltiplas compras em sequência rápida
         if self.ultima_compra_timestamp is not None:
             import time
@@ -266,31 +243,32 @@ class StrategySwingTrade:
                 self.logger.debug(f"⏱️ Cooldown ativo: {int(self.cooldown_segundos - tempo_desde_ultima_compra)}s restantes")
                 return None
 
-        # Calcular queda percentual desde a máxima
-        queda_pct = ((self.preco_referencia_maxima - preco_atual) / self.preco_referencia_maxima) * Decimal('100')
-        
-        # Calcular preço de gatilho
-        preco_gatilho = self.preco_referencia_maxima * (Decimal('1') - self.gatilho_compra_pct / Decimal('100'))
+        # VERIFICAR ENTRADA: RSI < Limite
+        if not self.usar_filtro_rsi_entrada:
+            self.logger.debug("[SwingTrade] Filtro RSI DESABILITADO - ignorando lógica de compra")
+            return None
 
-        # DEBUG: Log detalhado da lógica de compra
+        rsi_atual = self._obter_rsi_atual()
+
+        if rsi_atual is None:
+            self.logger.debug("[SwingTrade] Não conseguiu obter RSI - ignorando compra")
+            return None
+
         self.logger.debug(
-            f"[SwingTrade] Posição VAZIA. Pico Recente: ${self.preco_referencia_maxima:.6f}. "
-            f"Preço Atual: ${preco_atual:.6f}. Gatilho de Compra: ${preco_gatilho:.6f}."
-        )
-        self.logger.debug(
-            f"[SwingTrade] Queda calculada: {queda_pct:.2f}% (gatilho: {self.gatilho_compra_pct}%)"
+            f"[SwingTrade] Verificando entrada: RSI={rsi_atual:.2f}, Limite={self.rsi_limite_compra:.2f}"
         )
 
-        # Log sobre a queda (usando INFO para garantir visibilidade)
+        # Log sobre o RSI (usando INFO para garantir visibilidade)
         self.logger.info(
-            f"📉 Giro Rápido | Queda desde máx: {queda_pct:.2f}% | "
-            f"Gatilho: {self.gatilho_compra_pct}% | "
-            f"Atingiu: {'SIM ✓' if queda_pct >= self.gatilho_compra_pct else 'NÃO ✗'}"
+            f"📊 Giro Rápido | RSI: {rsi_atual:.2f} | "
+            f"Limite: {self.rsi_limite_compra:.2f} | "
+            f"Gatilho: {'SIM ✓' if rsi_atual < self.rsi_limite_compra else 'NÃO ✗'}"
         )
 
-        # Verificar se atingiu o gatilho de compra
-        if queda_pct >= self.gatilho_compra_pct:
-            self.logger.debug(f"[SwingTrade] ✅ Gatilho de compra ATINGIDO!")
+        # Verificar se RSI atingiu o gatilho
+        if rsi_atual < self.rsi_limite_compra:
+            self.logger.debug(f"[SwingTrade] ✅ Gatilho RSI ATINGIDO!")
+
             # Calcular quanto comprar (100% do capital disponível da carteira giro_rapido)
             capital_disponivel = self.gestao_capital.calcular_capital_disponivel('giro_rapido')
 
@@ -301,8 +279,8 @@ class StrategySwingTrade:
                     f"[SwingTrade] Compra BLOQUEADA. Capital disponível: ${capital_disponivel:.2f} "
                     f"(alocação: {self.alocacao_capital_pct}%)"
                 )
-                self.logger.warning("⚠️ Oportunidade de compra detectada, mas SEM CAPITAL disponível!")
-                self.logger.warning(f"   Verifique saldo USDT e configuração de alocação ({self.alocacao_capital_pct}%)")
+                self.logger.debug("⚠️ Oportunidade de compra detectada, mas SEM CAPITAL disponível!")
+                self.logger.debug(f"   Verifique saldo USDT e configuração de alocação ({self.alocacao_capital_pct}%)")
                 return None
 
             # Verificar valor mínimo de ordem
@@ -311,7 +289,7 @@ class StrategySwingTrade:
                 self.logger.debug(
                     f"[SwingTrade] Compra BLOQUEADA. Capital ${capital_disponivel:.2f} < mínimo ${valor_minimo:.2f}"
                 )
-                self.logger.warning(f"⚠️ Capital disponível (${capital_disponivel:.2f}) abaixo do mínimo (${valor_minimo:.2f})")
+                self.logger.debug(f"⚠️ Capital disponível (${capital_disponivel:.2f}) abaixo do mínimo (${valor_minimo:.2f})")
                 return None
 
             # Validar com gestão de capital
@@ -319,7 +297,7 @@ class StrategySwingTrade:
 
             if not pode_comprar:
                 self.logger.debug(f"[SwingTrade] Compra BLOQUEADA pela gestão de capital: {motivo}")
-                self.logger.warning(f"⚠️ Compra bloqueada pela gestão de capital: {motivo}")
+                self.logger.debug(f"⚠️ Compra bloqueada pela gestão de capital: {motivo}")
                 if self.notifier:
                     titulo = "Compra Bloqueada (Giro Rápido)"
                     mensagem = (
@@ -327,7 +305,6 @@ class StrategySwingTrade:
                         f"🔒 **Bloqueio:** Gestão de Capital\n"
                         f"📄 **Motivo:** {motivo}"
                     )
-                    # Para evitar spam, podemos adicionar um mecanismo de state com TTL aqui se necessário
                     self.notifier.enviar_alerta(titulo, mensagem)
                 return None
 
@@ -337,10 +314,10 @@ class StrategySwingTrade:
             stop_loss_nivel = preco_atual * (Decimal('1') - self.stop_loss_inicial_pct / Decimal('100'))
 
             self.logger.info(f"🎯 OPORTUNIDADE DE COMPRA (Giro Rápido)")
-            self.logger.info(f"   Queda: {queda_pct:.2f}% desde ${self.preco_referencia_maxima:.6f}")
+            self.logger.info(f"   RSI: {rsi_atual:.2f}% (limite: {self.rsi_limite_compra:.2f}%)")
             self.logger.info(f"   Preço atual: ${preco_atual:.6f}")
             self.logger.info(f"   Valor: ${capital_disponivel:.2f} ({quantidade:.4f} moedas)")
-            self.logger.info(f"   🛡️ Stop Loss: ${stop_loss_nivel:.6f} ({self.stop_loss_inicial_pct}%)")
+            self.logger.info(f"   🛡️ Stop Loss (Inicial): ${stop_loss_nivel:.6f} ({self.stop_loss_inicial_pct}%)")
 
             return {
                 'tipo': 'compra',
@@ -348,15 +325,14 @@ class StrategySwingTrade:
                 'quantidade': quantidade,
                 'preco_atual': preco_atual,
                 'valor_operacao': capital_disponivel,
-                'motivo': f'Queda de {queda_pct:.2f}% - Giro Rápido',
-                'queda_pct': queda_pct,
-                'preco_referencia': self.preco_referencia_maxima,
+                'motivo': f'RSI {rsi_atual:.2f}% < {self.rsi_limite_compra:.2f}% - Giro Rápido',
+                'rsi_entrada': rsi_atual,
                 'stop_loss_nivel': stop_loss_nivel  # Nível de stop loss inicial
             }
         else:
             # DEBUG: Log quando compra é bloqueada
             self.logger.debug(
-                f"[SwingTrade] Compra BLOQUEADA. Preço ${preco_atual:.6f} não atingiu o gatilho de ${preco_gatilho:.6f}."
+                f"[SwingTrade] Compra bloqueada. RSI {rsi_atual:.2f}% >= limite {self.rsi_limite_compra:.2f}%"
             )
 
         return None
@@ -367,9 +343,9 @@ class StrategySwingTrade:
 
         Lógica:
         1. Calcular lucro atual
-        2. Atualizar high water mark
-        3. Verificar meta principal de lucro
-        4. Verificar proteção de lucro (trailing stop)
+        2. Verificar se Stop Loss foi disparado
+        3. Verificar se TSL foi disparado
+        4. Retornar sinal de venda se algum stop disparou
 
         Args:
             preco_atual: Preço atual do ativo
@@ -384,76 +360,59 @@ class StrategySwingTrade:
             self.logger.warning("⚠️ Não foi possível calcular lucro atual (giro rápido)")
             return None
 
-        # Atualizar high water mark
-        self.position_manager.atualizar_high_water_mark(lucro_atual, 'giro_rapido')
-        high_water_mark = self.position_manager.get_high_water_mark('giro_rapido')
-        
-        # Obter preço médio e calcular pico TSL (se aplicável)
         preco_medio = self.position_manager.get_preco_medio('giro_rapido')
-        pico_tsl = preco_medio * (Decimal('1') + high_water_mark / Decimal('100')) if preco_medio else None
-        nivel_stop = pico_tsl * (Decimal('1') - self.trailing_stop_distancia_pct / Decimal('100')) if pico_tsl else None
 
         # DEBUG: Log detalhado da lógica de venda
-        pico_tsl_str = f"{pico_tsl:.6f}" if pico_tsl is not None else "N/A"
-        nivel_stop_str = f"{nivel_stop:.6f}" if nivel_stop is not None else "N/A"
         self.logger.debug(
-            f"[SwingTrade] Posição ATIVA. Lucro: {lucro_atual:.2f}%. Meta: {self.meta_lucro_pct:.2f}%. "
-            f"Pico TSL: ${pico_tsl_str}. Nível Stop: ${nivel_stop_str}."
+            f"[SwingTrade] Posição ATIVA. Lucro: {lucro_atual:.2f}%. "
+            f"Preço Médio: ${preco_medio:.6f}. Preço Atual: ${preco_atual:.6f}."
         )
-        self.logger.debug(f"📈 Giro Rápido - Lucro: {lucro_atual:.2f}% | HWM: {high_water_mark:.2f}%")
+
+        # Calcular níveis de stops
+        stop_loss_nivel = preco_medio * (Decimal('1') - self.stop_loss_inicial_pct / Decimal('100'))
+
+        self.logger.debug(
+            f"📈 Giro Rápido - Lucro: {lucro_atual:.2f}% | "
+            f"SL Inicial: ${stop_loss_nivel:.6f}"
+        )
 
         # ═════════════════════════════════════════════════════════════════
-        # 1. VERIFICAÇÃO DE META PRINCIPAL - ATIVAR TSL UMA ÚNICA VEZ
+        # VERIFICAÇÃO 1: STOP LOSS INICIAL
         # ═════════════════════════════════════════════════════════════════
-        # IMPORTANTE: Este retorno será chamado apenas UMA VEZ quando a meta for
-        # atingida. O BotWorker verifica se TSL já está ativo antes de reativar.
-        # Após ativação, o TSL é ATUALIZADO automaticamente no loop principal.
-        # ═════════════════════════════════════════════════════════════════
-        if lucro_atual >= self.meta_lucro_pct:
-            self.logger.debug(f"[SwingTrade] ✅ META DE LUCRO ATINGIDA: {lucro_atual:.2f}% >= {self.meta_lucro_pct:.2f}%")
-            self.logger.info(f"🎯 META DE LUCRO ATINGIDA (Giro Rápido)")
-            self.logger.info(f"   Lucro atual: {lucro_atual:.2f}%")
-            self.logger.info(f"   Meta: {self.meta_lucro_pct:.2f}%")
-            self.logger.info(f"   🛡️ Ativando Trailing Stop Loss ({self.trailing_stop_distancia_pct}%)")
+        if preco_atual <= stop_loss_nivel:
+            self.logger.debug(f"[SwingTrade] ✅ STOP LOSS INICIAL DISPARADO!")
+            self.logger.info(f"🛑 STOP LOSS INICIAL DISPARADO (Giro Rápido)")
+            self.logger.info(f"   Lucro: {lucro_atual:.2f}%")
+            self.logger.info(f"   Preço: ${preco_atual:.6f} <= SL: ${stop_loss_nivel:.6f}")
 
             return {
-                'acao': 'ativar_tsl',
+                'tipo': 'venda',
                 'carteira': 'giro_rapido',
-                'distancia_pct': self.trailing_stop_distancia_pct,
                 'preco_atual': preco_atual,
-                'lucro_atual': lucro_atual,
-                'motivo': f'Meta de lucro atingida: {lucro_atual:.2f}% - Ativando TSL',
-                'meta_atingida': f'Meta {self.meta_lucro_pct}%'
+                'lucro_percentual': lucro_atual,
+                'motivo': f'Stop Loss Inicial - Lucro: {lucro_atual:.2f}%',
+                'motivo_venda': 'stop_loss'
             }
 
         # ═════════════════════════════════════════════════════════════════
-        # 2. VERIFICAÇÃO DE THRESHOLD DE ATIVAÇÃO - ATIVAR TSL UMA ÚNICA VEZ
+        # VERIFICAÇÃO 2: PROMOÇÃO DE STOP (SL → TSL no breakeven)
         # ═════════════════════════════════════════════════════════════════
-        # Se meta principal não foi atingida, verificar threshold de ativação menor.
-        # BotWorker garante que TSL só é ativado uma vez. Após isso, é apenas atualizado.
-        # ═════════════════════════════════════════════════════════════════
-        if lucro_atual >= self.trailing_stop_ativacao_pct:
-            self.logger.debug(f"[SwingTrade] ✅ THRESHOLD DE TSL ATINGIDO: {lucro_atual:.2f}% >= {self.trailing_stop_ativacao_pct:.2f}%")
-            self.logger.info(f"🛡️ GATILHO DE TSL ATINGIDO (Giro Rápido)")
-            self.logger.info(f"   Lucro atual: {lucro_atual:.2f}%")
-            self.logger.info(f"   Threshold: {self.trailing_stop_ativacao_pct:.2f}%")
-            self.logger.info(f"   🛡️ Ativando Trailing Stop Loss ({self.trailing_stop_distancia_pct}%)")
+        # Retornar sinal para promover o stop de SL para TSL
+        if lucro_atual >= 0:
+            self.logger.debug(f"[SwingTrade] ✅ BREAKEVEN ATINGIDO - Promover SL para TSL!")
+            self.logger.info(f"🎯 PROMOÇÃO DE STOP (Giro Rápido)")
+            self.logger.info(f"   Lucro atingiu: {lucro_atual:.2f}% (breakeven)")
+            self.logger.info(f"   Promovendo Stop Loss Inicial → Trailing Stop Loss")
+            self.logger.info(f"   TSL Distância: {self.trailing_stop_distancia_pct}%")
 
             return {
-                'acao': 'ativar_tsl',
+                'acao': 'promover_stop',
                 'carteira': 'giro_rapido',
-                'distancia_pct': self.trailing_stop_distancia_pct,
                 'preco_atual': preco_atual,
                 'lucro_atual': lucro_atual,
-                'motivo': f'Threshold de TSL atingido: {lucro_atual:.2f}%',
-                'threshold_atingido': f'{self.trailing_stop_ativacao_pct}%'
+                'distancia_tsl_pct': self.trailing_stop_distancia_pct,
+                'motivo': f'Breakeven atingido ({lucro_atual:.2f}%) - Promover para TSL'
             }
-        else:
-            # DEBUG: Log quando nenhuma condição de venda é atingida
-            self.logger.debug(
-                f"[SwingTrade] Nenhuma condição de venda atingida. "
-                f"Lucro {lucro_atual:.2f}% < Meta {self.meta_lucro_pct:.2f}% e < Threshold TSL {self.trailing_stop_ativacao_pct:.2f}%"
-            )
 
         return None
 
@@ -467,13 +426,10 @@ class StrategySwingTrade:
         """
         import time
 
-        # Resetar preço de referência após compra (nova base de cálculo)
-        self.preco_referencia_maxima = oportunidade['preco_atual']
-
         # Registrar timestamp da compra para ativar cooldown
         self.ultima_compra_timestamp = tempo_atual if tempo_atual is not None else time.time()
 
-        self.logger.info(f"📈 Compra executada (Giro Rápido) - Nova referência: ${self.preco_referencia_maxima:.6f}")
+        self.logger.info(f"📈 Compra executada (Giro Rápido)")
         self.logger.info(f"⏱️ Cooldown ativado: próxima compra permitida em {self.cooldown_segundos}s")
 
     def registrar_venda_executada(self, oportunidade: Dict[str, Any]):
@@ -483,15 +439,12 @@ class StrategySwingTrade:
         Args:
             oportunidade: Dados da oportunidade que foi executada
         """
-        # Após venda, resetar estado para forçar nova inicialização com histórico
-        self.preco_referencia_maxima = None
-        self._inicializado_com_historico = False
-
         # Resetar cooldown após venda (permitir nova compra imediatamente)
         self.ultima_compra_timestamp = None
 
-        self.logger.info(f"💰 Venda executada (Giro Rápido) - Ciclo completo. Lucro: {oportunidade.get('lucro_percentual', 0):.2f}%")
-        self.logger.info(f"✅ Cooldown resetado - próxima verificação irá buscar histórico de preços")
+        lucro = oportunidade.get('lucro_percentual', 0)
+        self.logger.info(f"💰 Venda executada (Giro Rápido) - Ciclo completo. Lucro: {lucro:.2f}%")
+        self.logger.info(f"✅ Cooldown resetado - próxima compra pode ocorrer imediatamente")
 
     def obter_estatisticas(self) -> Dict[str, Any]:
         """
@@ -502,20 +455,17 @@ class StrategySwingTrade:
         """
         quantidade = self.position_manager.get_quantidade_total('giro_rapido')
         preco_medio = self.position_manager.get_preco_medio('giro_rapido')
-        high_water_mark = self.position_manager.get_high_water_mark('giro_rapido')
 
         return {
-            'estrategia': 'Giro Rápido',
+            'estrategia': 'Giro Rápido (RSI + Stop Promovido)',
             'habilitada': self.habilitado,
             'quantidade_posicao': quantidade,
             'preco_medio': preco_medio,
             'alocacao_capital_pct': self.alocacao_capital_pct,
-            'gatilho_compra_pct': self.gatilho_compra_pct,
-            'meta_lucro_pct': self.meta_lucro_pct,
-            'protecao_ativacao_pct': self.protecao_ativacao_pct,
-            'protecao_reversao_pct': self.protecao_reversao_pct,
-            'preco_referencia_maxima': self.preco_referencia_maxima,
-            'high_water_mark': high_water_mark
+            'rsi_limite_compra': self.rsi_limite_compra,
+            'rsi_timeframe': self.rsi_timeframe_entrada,
+            'stop_loss_inicial_pct': self.stop_loss_inicial_pct,
+            'trailing_stop_distancia_pct': self.trailing_stop_distancia_pct
         }
 
 
@@ -528,32 +478,37 @@ if __name__ == '__main__':
         'DATABASE_PATH': 'dados/bot_trading.db',
         'BACKUP_DIR': 'dados/backup',
         'VALOR_MINIMO_ORDEM': 5.0,
+        'par': 'ADA/USDT',
+        'ESTRATEGIAS': {
+            'giro_rapido': True
+        },
         'estrategia_giro_rapido': {
             'habilitado': True,
             'alocacao_capital_pct': 20,
-            'gatilho_compra_pct': 2.0,
-            'meta_lucro_pct': 3.5,
-            'protecao_lucro': {
-                'ativacao_pct': 2.0,
-                'venda_reversao_pct': 0.5
-            }
+            'usar_filtro_rsi_entrada': True,
+            'rsi_timeframe_entrada': '15m',
+            'rsi_limite_compra': 30,
+            'stop_loss_inicial_pct': 2.5,
+            'trailing_stop_distancia_pct': 0.8
         }
     }
 
     db = DatabaseManager(Path('dados/bot_trading.db'), Path('dados/backup'))
     position_mgr = PositionManager(db)
     gestao_cap = GestaoCapital(saldo_usdt=Decimal('100'), percentual_reserva=Decimal('8'))
+    analise = AnaliseTecnica(None)
 
-    strategy = StrategySwingTrade(config_teste, position_mgr, gestao_cap)
+    strategy = StrategySwingTrade(config_teste, position_mgr, gestao_cap, analise)
 
     print("\n" + "="*60)
-    print("TESTE: Strategy Swing Trade")
+    print("TESTE: Strategy Swing Trade v2.0")
     print("="*60)
 
     stats = strategy.obter_estatisticas()
     print(f"\nEstratégia: {stats['estrategia']}")
     print(f"Habilitada: {stats['habilitada']}")
     print(f"Alocação: {stats['alocacao_capital_pct']}%")
-    print(f"Gatilho compra: {stats['gatilho_compra_pct']}%")
-    print(f"Meta lucro: {stats['meta_lucro_pct']}%")
-    print(f"\n✅ Estratégia de Giro Rápido inicializada com sucesso!")
+    print(f"RSI Limite: {stats['rsi_limite_compra']}%")
+    print(f"SL Inicial: {stats['stop_loss_inicial_pct']}%")
+    print(f"TSL Distância: {stats['trailing_stop_distancia_pct']}%")
+    print(f"\n✅ Estratégia de Giro Rápido v2.0 inicializada com sucesso!")

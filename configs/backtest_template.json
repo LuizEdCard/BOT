@@ -101,19 +101,18 @@
   "estrategia_giro_rapido": {
     "habilitado": true,
     "alocacao_capital_pct": 20,
-    
-    "_comentario_entrada": "Lógica de entrada",
-    "timeframe": "15m",
-    "lookback_periodos_compra": 96,
-    "gatilho_compra_pct": 2.0,
-    
+
+    "_comentario_entrada": "Entrada baseada em RSI (Relative Strength Index)",
     "usar_filtro_rsi_entrada": true,
     "rsi_timeframe_entrada": "15m",
     "rsi_limite_compra": 30,
 
-    "_comentario_saida": "Lógica de saída (Stop Promovido)",
+    "_comentario_saida": "Saída com Stop Promovido (SL → TSL no breakeven)",
     "stop_loss_inicial_pct": 2.5,
-    "trailing_stop_distancia_pct": 0.8
+    "trailing_stop_distancia_pct": 0.8,
+
+    "_comentario_cooldown": "Tempo mínimo entre compras sucessivas",
+    "cooldown_compra_segundos": 60
   },
   
 

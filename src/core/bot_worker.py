@@ -137,6 +137,7 @@ class BotWorker:
             config=self.config,
             position_manager=self.position_manager,
             gestao_capital=self.gestao_capital,
+            analise_tecnica=self.analise_tecnica,  # NOVO: Passar AnaliseTecnica para cálculo de RSI
             logger=swing_logger,
             notifier=self.notifier,
             exchange_api=self.exchange_api  # CRÍTICO: Passar API para buscar histórico
@@ -186,7 +187,7 @@ class BotWorker:
         # StrategySwingTrade
         swing_status = "HABILITADA" if self.strategy_swing_trade.habilitado else "DESABILITADA"
         if self.strategy_swing_trade.habilitado:
-            self.logger.info(f"   - StrategySwingTrade: {swing_status} (Timeframe: {self.strategy_swing_trade.timeframe})")
+            self.logger.info(f"   - StrategySwingTrade: {swing_status} (RSI Limite: {self.strategy_swing_trade.rsi_limite_compra}% | Timeframe: {self.strategy_swing_trade.rsi_timeframe_entrada})")
         else:
             self.logger.info(f"   - StrategySwingTrade: {swing_status}")
 
@@ -1277,6 +1278,71 @@ class BotWorker:
         except Exception as e:
             self.logger.error(f"❌ Erro ao ativar Trailing Stop Loss: {e}")
 
+    def _promover_stop_para_tsl(self, oportunidade: Dict[str, Any], preco_atual: Decimal):
+        """
+        Promove um Stop Loss Inicial para Trailing Stop Loss quando breakeven é atingido.
+
+        Este é o "Stop Promovido" da estratégia Giro Rápido:
+        - Fase 1: SL inicial protege a posição de perdas
+        - Fase 2: Quando lucro >= 0% (breakeven), promove para TSL
+        - Fase 3: TSL segue o preço dinamicamente
+
+        Args:
+            oportunidade: Dicionário com dados da promoção
+            preco_atual: Preço atual da moeda
+        """
+        try:
+            carteira = oportunidade.get('carteira', 'giro_rapido')
+            distancia_tsl_pct = oportunidade.get('distancia_tsl_pct', Decimal('0.8'))
+            lucro_atual = oportunidade.get('lucro_atual', 0)
+
+            distancia_tsl_pct = Decimal(str(distancia_tsl_pct))
+
+            # ═══════════════════════════════════════════════════════════════════
+            # VERIFICAÇÃO: Se já existe um TSL ativo, NÃO reativar
+            # ═══════════════════════════════════════════════════════════════════
+            if self.stops_ativos.get(carteira) and self.stops_ativos[carteira]['tipo'] == 'tsl':
+                self.logger.debug(f"⚠️ TSL já está ATIVO para [{carteira}] - ignorando promoção")
+                return
+
+            # Calcular nível inicial do TSL baseado no preço atual
+            nivel_stop_inicial = preco_atual * (Decimal('1') - distancia_tsl_pct / Decimal('100'))
+
+            # ═══════════════════════════════════════════════════════════════════
+            # PROMOÇÃO: Converter SL inicial em TSL
+            # ═══════════════════════════════════════════════════════════════════
+            self.stops_ativos[carteira] = {
+                'tipo': 'tsl',
+                'nivel_stop': nivel_stop_inicial,
+                'preco_pico': preco_atual,  # Pico inicial é o preço atual no breakeven
+                'distancia_pct': distancia_tsl_pct
+            }
+
+            # Salvar estado persistente
+            self._salvar_estado_stops()
+
+            self.logger.info(f"🎯 PROMOÇÃO DE STOP EXECUTADA [{carteira}]")
+            self.logger.info(f"   Stop Loss Inicial → Trailing Stop Loss")
+            self.logger.info(f"   📈 Lucro no breakeven: {lucro_atual:.2f}%")
+            self.logger.info(f"   📈 Pico inicial (breakeven): ${preco_atual:.6f}")
+            self.logger.info(f"   📍 Nível stop inicial: ${nivel_stop_inicial:.6f}")
+            self.logger.info(f"   📏 Distância TSL: {distancia_tsl_pct:.2f}%")
+
+            # Notificação
+            if self.notifier:
+                self.notifier.enviar_sucesso(
+                    f"🎯 Stop Promovido [Giro Rápido]",
+                    f"SL → TSL no breakeven\n"
+                    f"Lucro atingido: {lucro_atual:.2f}%\n"
+                    f"Preço: ${preco_atual:.6f}\n"
+                    f"TSL Distância: {distancia_tsl_pct:.2f}%"
+                )
+
+        except Exception as e:
+            self.logger.error(f"❌ Erro ao promover Stop Loss para TSL: {e}")
+            import traceback
+            self.logger.error(f"   Traceback: {traceback.format_exc()}")
+
     def _salvar_ordem_banco(self, ordem_dados: Dict[str, Any], estrategia: str):
         """
         Salva ordem no banco de dados
@@ -1534,7 +1600,11 @@ class BotWorker:
                     elif oportunidade_swing.get('acao') == 'ativar_tsl':
                         self._ativar_trailing_stop(oportunidade_swing, preco_atual)
                         return
-                    # Venda direta (caso ainda existam - deprecated)
+                    # NOVO: Promoção de Stop (SL → TSL no breakeven)
+                    elif oportunidade_swing.get('acao') == 'promover_stop':
+                        self._promover_stop_para_tsl(oportunidade_swing, preco_atual)
+                        return
+                    # Venda direta (quando stop é disparado)
                     elif oportunidade_swing.get('tipo') == 'venda':
                         if self._executar_oportunidade_venda(oportunidade_swing):
                             self.logger.info("✅ Venda executada com sucesso (Giro Rápido)!")
