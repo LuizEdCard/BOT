@@ -1,0 +1,71 @@
+{
+  "_comentario_geral": "Exemplo completo de configuração para Giro Rápido com Stop Promovido v2.0",
+
+  "nome_instancia": "Giro_Rapido_Bot",
+  "exchange": "binance",
+  "par": "ADA/USDT",
+  "AMBIENTE": "produção",
+
+  "_secao_caminhos": "Caminhos de persistência",
+  "DATABASE_PATH": "dados/bot_trading.db",
+  "BACKUP_DIR": "dados/backups",
+  "STATE_FILE_PATH": "dados/state.json",
+
+  "_secao_api": "Chaves de API (lidas do arquivo .env)",
+  "api_key_env": "BINANCE_API_KEY",
+  "api_secret_env": "BINANCE_API_SECRET",
+  "api_passphrase_env": null,
+
+  "_secao_capital": "Gestão de capital",
+  "CAPITAL_INICIAL": 500.0,
+  "PERCENTUAL_RESERVA": 8.0,
+  "VALOR_MINIMO_ORDEM": 5.0,
+
+  "_secao_timing": "Controles de tempo",
+  "COOLDOWN_GLOBAL_APOS_COMPRA_MINUTOS": 10,
+  "INTERVALO_CICLO_SEGUNDOS": 5,
+  "PAUSA_APOS_ERRO_SEGUNDOS": 60,
+  "PAUSA_APOS_OPERACAO_SEGUNDOS": 10,
+
+  "_secao_aportes": "Sistema de aportes (desabilitado para trading)",
+  "APORTES": {
+    "habilitado": false,
+    "intervalo_verificacao_minutos": 30,
+    "valor_minimo_brl_para_converter": 50.0
+  },
+
+  "_secao_estrategias": "Seleção de estratégias ativas",
+  "ESTRATEGIAS": {
+    "dca": false,
+    "giro_rapido": true
+  },
+
+  "_comentario_importante": "CONFIGURAÇÃO GIRO RÁPIDO v2.0 - Stop Promovido com Separação de Responsabilidades",
+
+  "estrategia_giro_rapido": {
+    "habilitado": true,
+
+    "_alocacao": "Porcentagem do capital total para Giro Rápido",
+    "alocacao_capital_pct": 50,
+
+    "_entrada_rsi": "Parâmetros de ENTRADA baseados em RSI",
+    "usar_filtro_rsi_entrada": true,
+    "rsi_timeframe_entrada": "15m",
+    "rsi_limite_compra": 30,
+    "_rsi_comentario": "Compra quando RSI < 30 (sobrevenda)",
+
+    "_saida_stops": "Parâmetros de SAÍDA (gerenciados 100% pelo BotWorker)",
+    "stop_loss_inicial_pct": 2.5,
+    "_sl_comentario": "SL inicial ativado após cada compra",
+
+    "trailing_stop_distancia_pct": 0.8,
+    "_tsl_comentario": "TSL ativado quando preço >= preco_medio (breakeven)",
+
+    "cooldown_compra_segundos": 60,
+    "_cooldown_comentario": "Tempo mínimo entre compras sucessivas"
+  },
+
+  "_secao_auditoria": "Parâmetros de auditoria e logging",
+  "INTERVALO_LOG_PROGRESSO_CANDLES": 100,
+  "LOG_LEVEL": "INFO"
+}
