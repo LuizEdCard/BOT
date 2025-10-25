@@ -314,14 +314,17 @@ class SimulatedExchangeAPI(ExchangeAPI):
         """
         Obtém histórico de candlesticks (klines) para um símbolo e intervalo.
         Simula o comportamento de exchanges reais retornando dados resampleados.
-        
+
+        CORREÇÃO: Respeita o timestamp atual da simulação para evitar lookahead bias.
+        Garante que a estratégia nunca veja dados além do momento atual.
+
         Args:
             simbolo: Par (ex: ADAUSDT) - ignorado na simulação
             intervalo: 1h, 4h, 1d, etc.
             limite: Número de candles (máx)
             inicio: Timestamp início em ms (opcional)
             fim: Timestamp fim em ms (opcional)
-            
+
         Returns:
             Lista de klines: [
                 [
@@ -342,19 +345,41 @@ class SimulatedExchangeAPI(ExchangeAPI):
             self.dados_resampled[intervalo] = df_resampled
         else:
             df_resampled = self.dados_resampled[intervalo]
-        
-        # Aplicar filtro de tempo se fornecido
+
+        # CORREÇÃO CRÍTICA: Obter o timestamp atual da simulação
+        # para não retornar dados futuros (lookahead bias)
+        if self.indice_atual > 0 and self.indice_atual <= len(self.dados):
+            timestamp_atual = pd.to_datetime(self.dados.iloc[self.indice_atual - 1]['timestamp'])
+        else:
+            # Se ainda não iniciou a simulação, usar o último timestamp disponível
+            timestamp_atual = df_resampled.index[-1]
+
+        # Aplicar filtro de tempo
         df_filtrado = df_resampled.copy()
+
+        # CRÍTICO: Limitar ao timestamp atual da simulação (evita ver o futuro!)
+        df_filtrado = df_filtrado[df_filtrado.index <= timestamp_atual]
+
+        # Aplicar filtro de início se fornecido (somente se não limita ao futuro)
         if inicio:
             inicio_dt = pd.to_datetime(inicio, unit='ms')
             df_filtrado = df_filtrado[df_filtrado.index >= inicio_dt]
+
+        # Aplicar filtro de fim se fornecido (somente se não limita ao futuro)
         if fim:
             fim_dt = pd.to_datetime(fim, unit='ms')
-            df_filtrado = df_filtrado[df_filtrado.index <= fim_dt]
-        
-        # Limitar número de resultados
+            # Limitar ao mínimo entre o fim solicitado e o timestamp atual
+            fim_dt_limitado = min(fim_dt, timestamp_atual)
+            df_filtrado = df_filtrado[df_filtrado.index <= fim_dt_limitado]
+
+        # Limitar número de resultados aos últimos 'limite' candles
         df_filtrado = df_filtrado.tail(limite)
-        
+
+        logger.debug(
+            f"📊 Klines obtidas: {len(df_filtrado)} candles para {intervalo} "
+            f"(limite: {limite}, timestamp_atual: {timestamp_atual})"
+        )
+
         # Converter para formato de klines (similar ao retornado pela Binance)
         klines = []
         for timestamp, row in df_filtrado.iterrows():
@@ -375,7 +400,7 @@ class SimulatedExchangeAPI(ExchangeAPI):
                 '0',                             # taker buy quote asset volume
                 '0'                              # ignore
             ])
-        
+
         return klines
 
     def get_resultados(self):

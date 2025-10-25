@@ -39,7 +39,7 @@ class GestaoCapital:
     - Cada carteira tem seu próprio saldo alocado
     """
 
-    def __init__(self, saldo_usdt: Decimal = Decimal('0'), valor_posicao_ada: Decimal = Decimal('0'), percentual_reserva: Decimal = Decimal('8'), modo_simulacao: bool = False):
+    def __init__(self, saldo_usdt: Decimal = Decimal('0'), valor_posicao_ada: Decimal = Decimal('0'), percentual_reserva: Decimal = Decimal('8'), modo_simulacao: bool = False, exchange_api=None):
         """
         Inicializar gestor de capital
 
@@ -48,11 +48,13 @@ class GestaoCapital:
             valor_posicao_ada: Valor da posição em ADA (em USDT) - carteira acumulação
             percentual_reserva: Percentual da reserva (padrão: 8%)
             modo_simulacao: Se True, permite atualização direta de saldo (para backtesting)
+            exchange_api: Referência à API de exchange (necessária para sincronização em modo simulação)
         """
         self.saldo_usdt = saldo_usdt
         self.percentual_reserva = percentual_reserva / Decimal('100')
         self.saldo_minimo = Decimal('5.00')
         self.modo_simulacao = modo_simulacao
+        self.exchange_api = exchange_api  # Necessário para modo simulação
 
         # Carteiras separadas
         self.carteiras = {
@@ -185,7 +187,7 @@ class GestaoCapital:
         """
         Calcula capital disponível para trading por carteira
 
-        Em modo simulação, usa o saldo específico da carteira (já dividido na SimulatedExchangeAPI).
+        Em modo simulação, usa o saldo REAL da carteira (não recalcula percentual).
         Em modo real, calcula a divisão dinamicamente com base no saldo total.
 
         Args:
@@ -194,33 +196,28 @@ class GestaoCapital:
         Returns:
             Capital disponível em USDT para a carteira especificada
         """
-        # Em modo simulação, cada carteira tem seu próprio saldo separado
-        # Não aplicamos reserva por carteira, apenas para o total
-        reserva = self.calcular_reserva_obrigatoria()
-
-        # IMPORTANTE: Em modo simulação, o saldo_usdt já é o saldo TOTAL
-        # A SimulatedExchangeAPI mantém os saldos separados em saldos_por_carteira
-        saldo_livre = self.saldo_usdt - reserva
-
-        if saldo_livre <= 0:
-            return Decimal('0')
-
-        # Em modo simulação com carteiras separadas:
-        # Não recalculamos a divisão aqui - o saldo já está dividido na API
-        # Portanto, retornamos o saldo livre (sem aplicar percentual novamente)
-        # A divisão 80/20 já foi feita na inicialização da SimulatedExchangeAPI
-
         if self.modo_simulacao:
-            # Em modo simulação: cada carteira tem seu próprio saldo
-            # Não aplicamos percentuais aqui - eles já foram aplicados na API
-            if carteira == 'giro_rapido':
-                # 20% do capital total
-                return self.saldo_usdt * (self.alocacao_giro_rapido_pct / Decimal('100'))
-            elif carteira == 'acumulacao':
-                # 80% do capital total (100% - 20%)
-                return self.saldo_usdt * ((Decimal('100') - self.alocacao_giro_rapido_pct) / Decimal('100'))
+            # ✅ CRÍTICO: Em modo simulação, usar o saldo REAL da API
+            # Não recalcular percentuais! A SimulatedExchangeAPI já mantém
+            # os saldos separados corretamente após cada trade.
+            try:
+                saldo_carteira = Decimal(str(
+                    self.exchange_api.saldos_por_carteira[carteira]['saldo_usdt']
+                ))
+                # Aplicar reserva apenas se necessário
+                reserva = self.calcular_reserva_obrigatoria()
+                return max(saldo_carteira - reserva, Decimal('0'))
+            except (KeyError, AttributeError, TypeError) as e:
+                logger.warning(f"⚠️ Erro ao obter saldo da carteira '{carteira}': {e}")
+                return Decimal('0')
         else:
             # Em modo real: calcular dividindo o saldo livre
+            reserva = self.calcular_reserva_obrigatoria()
+            saldo_livre = self.saldo_usdt - reserva
+
+            if saldo_livre <= 0:
+                return Decimal('0')
+
             if carteira == 'giro_rapido':
                 # Giro rápido usa um percentual do saldo livre
                 return saldo_livre * (self.alocacao_giro_rapido_pct / Decimal('100'))

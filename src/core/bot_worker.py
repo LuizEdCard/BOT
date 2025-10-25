@@ -82,7 +82,8 @@ class BotWorker:
         self.analise_tecnica = AnaliseTecnica(self.exchange_api)
         self.gestao_capital = GestaoCapital(
             percentual_reserva=Decimal(str(self.config.get('PERCENTUAL_RESERVA', 8))),
-            modo_simulacao=modo_simulacao
+            modo_simulacao=modo_simulacao,
+            exchange_api=self.exchange_api
         )
         
         # ===========================================================================

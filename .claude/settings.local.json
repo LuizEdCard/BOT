@@ -19,7 +19,8 @@
       "Bash(source:*)",
       "Bash(sqlite3:*)",
       "Bash(timeout 90 python manager.py)",
-      "Bash(tee:*)"
+      "Bash(tee:*)",
+      "Read(//tmp/**)"
     ],
     "deny": [],
     "ask": []
