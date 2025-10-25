@@ -103,25 +103,39 @@ class GestaoCapital:
 
     def set_saldo_usdt_simulado(self, novo_saldo: Decimal, carteira: str):
         """
-        Atualiza o saldo USDT interno da carteira especificada diretamente.
-        
-        IMPORTANTE: Este método é específico para modo simulação e permite
-        sincronização do saldo USDT após operações simuladas.
-        
+        Sincroniza o saldo USDT total com base nos saldos individuais das carteiras.
+
+        IMPORTANTE: Este método é específico para modo simulação. Ele NÃO sobrescreve
+        o saldo total com o valor de uma carteira. Em vez disso, calcula o saldo total
+        como a soma dos saldos de AMBAS as carteiras (giro_rapido + acumulacao).
+
+        Isso previne desincronização entre GestaoCapital e SimulatedExchangeAPI.
+
         Args:
-            novo_saldo: Novo saldo USDT a ser definido
+            novo_saldo: Novo saldo USDT da carteira especificada (usado apenas para log)
             carteira: Nome da carteira ('acumulacao' ou 'giro_rapido')
         """
         if not self.modo_simulacao:
             logger.warning("⚠️ Tentativa de usar set_saldo_usdt_simulado fora do modo simulação - ignorando")
             return
-        
+
+        # IMPORTANTE: Calcular saldo total como SOMA de ambas as carteiras
+        # em vez de sobrescrever com o valor de uma única carteira
+        try:
+            saldo_giro = Decimal(str(self.exchange_api.saldos_por_carteira['giro_rapido']['saldo_usdt']))
+            saldo_acum = Decimal(str(self.exchange_api.saldos_por_carteira['acumulacao']['saldo_usdt']))
+            saldo_total_novo = saldo_giro + saldo_acum
+        except (KeyError, AttributeError, TypeError) as e:
+            # Fallback se algo der errado com o acesso à API
+            logger.warning(f"⚠️ Erro ao sincronizar saldo total: {e}. Usando valor fornecido como fallback.")
+            saldo_total_novo = novo_saldo
+
         saldo_anterior = self.saldo_usdt
-        self.saldo_usdt = novo_saldo
-        
-        diferenca = novo_saldo - saldo_anterior
+        self.saldo_usdt = saldo_total_novo
+
+        diferenca = saldo_total_novo - saldo_anterior
         simbolo = "+" if diferenca >= 0 else ""
-        logger.debug(f"💰 Saldo USDT atualizado [{carteira}]: ${saldo_anterior:.2f} → ${novo_saldo:.2f} ({simbolo}{diferenca:.2f})")
+        logger.debug(f"💰 Saldo USDT sincronizado [{carteira}]: ${saldo_anterior:.2f} → ${saldo_total_novo:.2f} ({simbolo}{diferenca:.2f})")
 
     def atualizar_saldos(self, saldo_usdt: Decimal, valor_posicao_ada: Decimal = Decimal('0'), carteira: str = 'acumulacao'):
         """
