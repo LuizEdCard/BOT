@@ -68,8 +68,9 @@ class GestaoCapital:
             }
         }
 
-        # Configuração de alocação para giro_rapido (padrão 20%)
-        self.alocacao_giro_rapido_pct = Decimal('20')
+        # ✅ Alocação será configurada via configurar_alocacao_giro_rapido()
+        # NÃO usar padrão hardcoded aqui - deixar None para detectar se foi configurado
+        self.alocacao_giro_rapido_pct = None
 
     def configurar_alocacao_giro_rapido(self, percentual: Decimal):
         """
@@ -219,9 +220,21 @@ class GestaoCapital:
                 return Decimal('0')
 
             if carteira == 'giro_rapido':
+                # ✅ Validação: alocacao_giro_rapido_pct DEVE ter sido configurado
+                if self.alocacao_giro_rapido_pct is None:
+                    logger.error("❌ ERRO CRÍTICO: alocacao_giro_rapido_pct não foi configurada! "
+                                 "BotWorker.configurar_alocacao_giro_rapido() deve ser chamado durante inicialização.")
+                    raise ValueError("alocacao_giro_rapido_pct não foi configurada - impossível alocar capital")
+
                 # Giro rápido usa um percentual do saldo livre
                 return saldo_livre * (self.alocacao_giro_rapido_pct / Decimal('100'))
             elif carteira == 'acumulacao':
+                # ✅ Validação: alocacao_giro_rapido_pct DEVE ter sido configurado
+                if self.alocacao_giro_rapido_pct is None:
+                    logger.error("❌ ERRO CRÍTICO: alocacao_giro_rapido_pct não foi configurada! "
+                                 "BotWorker.configurar_alocacao_giro_rapido() deve ser chamado durante inicialização.")
+                    raise ValueError("alocacao_giro_rapido_pct não foi configurada - impossível alocar capital")
+
                 # Acumulação usa o restante do saldo livre
                 saldo_giro_rapido = saldo_livre * (self.alocacao_giro_rapido_pct / Decimal('100'))
                 return saldo_livre - saldo_giro_rapido

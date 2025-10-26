@@ -59,7 +59,10 @@
     "_sl_comentario": "SL inicial ativado após cada compra",
 
     "trailing_stop_distancia_pct": 0.8,
-    "_tsl_comentario": "TSL ativado quando preço >= preco_medio (breakeven)",
+    "_tsl_comentario": "TSL ativado quando o lucro atingir tsl_gatilho_lucro_pct",
+
+    "tsl_gatilho_lucro_pct": 1.5,
+    "_tsl_gatilho_comentario": "Gatilho de lucro (%) para promover SL para TSL. Antes era 0% (breakeven), agora exige lucro mínimo",
 
     "cooldown_compra_segundos": 60,
     "_cooldown_comentario": "Tempo mínimo entre compras sucessivas"

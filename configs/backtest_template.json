@@ -100,16 +100,19 @@
 
   "estrategia_giro_rapido": {
     "habilitado": true,
-    "alocacao_capital_pct": 20,
+    "alocacao_capital_pct": 50,
 
     "_comentario_entrada": "Entrada baseada em RSI (Relative Strength Index)",
     "usar_filtro_rsi_entrada": true,
-    "rsi_timeframe_entrada": "15m",
-    "rsi_limite_compra": 30,
+    "rsi_timeframe_entrada": "5m",
+    "rsi_limite_compra": 35,
 
-    "_comentario_saida": "Saída com Stop Promovido (SL → TSL no breakeven)",
-    "stop_loss_inicial_pct": 2.5,
+    "_comentario_saida": "Saída com Stop Promovido (SL → TSL com gatilho de lucro)",
+    "stop_loss_inicial_pct": 1,
     "trailing_stop_distancia_pct": 0.8,
+
+    "tsl_gatilho_lucro_pct": 3,
+    "_tsl_gatilho_comentario": "Lucro mínimo (%) para promover SL para TSL. Aumentar para limitar ganhos mas reduzir perdas.",
 
     "_comentario_cooldown": "Tempo mínimo entre compras sucessivas",
     "cooldown_compra_segundos": 60

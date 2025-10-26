@@ -261,7 +261,14 @@ class AnaliseTecnica:
     def get_rsi(self, par, timeframe='4h', periodo=14, limite_candles=100) -> Optional[Decimal]:
         """Busca o valor do RSI para um par de moedas."""
         try:
-            klines = self.api.obter_klines(par, timeframe, limite_candles)
+            # Sanitizar timeframe (pode estar malformado como "30Mh")
+            timeframe_clean = str(timeframe).lower() if timeframe else '4h'
+            if timeframe_clean.endswith('mh'):
+                timeframe_clean = timeframe_clean[:-1]  # Remove 'h' final de "30Mh" → "30m"
+            elif timeframe_clean.endswith('hh'):
+                timeframe_clean = timeframe_clean[:-1]  # Remove 'h' final de "1hh" → "1h"
+
+            klines = self.api.obter_klines(par, timeframe_clean, limite_candles)
             if not klines:
                 return None
 

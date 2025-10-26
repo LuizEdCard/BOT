@@ -91,9 +91,19 @@ class BotWorker:
         # ===========================================================================
         # Obter percentual de alocação da configuração do giro rápido
         estrategia_giro_config = self.config.get('estrategia_giro_rapido', {})
-        alocacao_giro_pct = Decimal(str(estrategia_giro_config.get('alocacao_capital_pct', 20)))
+        alocacao_giro_pct = estrategia_giro_config.get('alocacao_capital_pct', None)
+
+        # ✅ Validação: garantir que foi configurado
+        if alocacao_giro_pct is None:
+            self.logger.warning("⚠️  AVISO: 'alocacao_capital_pct' não foi encontrado em config['estrategia_giro_rapido']")
+            self.logger.warning("           Verifique se perguntar_parametros_giro_rapido() foi chamado em backtest.py")
+            self.logger.warning("           Usando fallback: 20% (padrão de segurança)")
+            alocacao_giro_pct = Decimal('20')
+        else:
+            alocacao_giro_pct = Decimal(str(alocacao_giro_pct))
+
         self.gestao_capital.configurar_alocacao_giro_rapido(alocacao_giro_pct)
-        self.logger.info(f"⚙️  Alocação do Giro Rápido configurada: {alocacao_giro_pct}% do saldo livre")
+        self.logger.info(f"✅ Alocação do Giro Rápido configurada: {alocacao_giro_pct}% do saldo livre")
 
         # Banco de dados e estado
         self.db = DatabaseManager(
@@ -1494,42 +1504,53 @@ class BotWorker:
                         continue  # Pular resto do ciclo após executar venda
 
                     # VERIFICAÇÃO 2: PROMOÇÃO (SL → TSL) APENAS PARA GIRO_RAPIDO
-                    # Quando breakeven é atingido, promover SL para TSL
+                    # Promover SL para TSL quando atingir gatilho de lucro mínimo
                     if carteira == 'giro_rapido':
                         preco_medio = self.position_manager.get_preco_medio('giro_rapido')
-                        if preco_medio and preco_atual >= preco_medio:
-                            # BREAKEVEN ATINGIDO: Promover para TSL
-                            distancia_tsl_pct = self.strategy_swing_trade.trailing_stop_distancia_pct
+                        if preco_medio:
+                            # Calcular lucro percentual
+                            lucro_pct = ((preco_atual - preco_medio) / preco_medio) * Decimal('100')
 
-                            self.logger.info(f"🎯 PROMOÇÃO DE STOP [{carteira}] - BREAKEVEN ATINGIDO")
-                            self.logger.info(f"   Stop Loss Inicial → Trailing Stop Loss")
-                            self.logger.info(f"   Preço Médio: ${preco_medio:.6f}")
-                            self.logger.info(f"   Preço Atual: ${preco_atual:.6f}")
-                            self.logger.info(f"   TSL Distância: {distancia_tsl_pct:.2f}%")
+                            # Obter gatilho de lucro mínimo da config (padrão: 0% para breakeven)
+                            estrategia_config = self.config.get('estrategia_giro_rapido', {})
+                            tsl_gatilho_lucro = Decimal(str(estrategia_config.get('tsl_gatilho_lucro_pct', 0)))
 
-                            # Desativar SL e ativar TSL
-                            nivel_tsl_inicial = preco_atual * (Decimal('1') - distancia_tsl_pct / Decimal('100'))
+                            # Verificar se atingiu o gatilho de lucro mínimo
+                            if lucro_pct >= tsl_gatilho_lucro:
+                                # GATILHO ATINGIDO: Promover para TSL
+                                distancia_tsl_pct = self.strategy_swing_trade.trailing_stop_distancia_pct
 
-                            self.stops_ativos['giro_rapido'] = {
-                                'tipo': 'tsl',
-                                'nivel_stop': nivel_tsl_inicial,
-                                'preco_pico': preco_atual,
-                                'distancia_pct': distancia_tsl_pct
-                            }
+                                self.logger.info(f"🎯 PROMOÇÃO DE STOP [{carteira}] - GATILHO DE LUCRO ATINGIDO")
+                                self.logger.info(f"   Stop Loss Inicial → Trailing Stop Loss")
+                                self.logger.info(f"   Preço Médio: ${preco_medio:.6f}")
+                                self.logger.info(f"   Preço Atual: ${preco_atual:.6f}")
+                                self.logger.info(f"   Lucro: {lucro_pct:+.2f}% (Gatilho: {tsl_gatilho_lucro:.2f}%)")
+                                self.logger.info(f"   TSL Distância: {distancia_tsl_pct:.2f}%")
 
-                            self._salvar_estado_stops()
+                                # Desativar SL e ativar TSL
+                                nivel_tsl_inicial = preco_atual * (Decimal('1') - distancia_tsl_pct / Decimal('100'))
 
-                            # Notificar
-                            if self.notifier:
-                                self.notifier.enviar_sucesso(
-                                    f"🎯 Stop Promovido [Giro Rápido]",
-                                    f"SL Inicial → Trailing Stop Loss\n"
-                                    f"Breakeven atingido: {preco_atual:.6f}\n"
-                                    f"TSL Nível: {nivel_tsl_inicial:.6f}\n"
-                                    f"TSL Distância: {distancia_tsl_pct:.2f}%"
-                                )
+                                self.stops_ativos['giro_rapido'] = {
+                                    'tipo': 'tsl',
+                                    'nivel_stop': nivel_tsl_inicial,
+                                    'preco_pico': preco_atual,
+                                    'distancia_pct': distancia_tsl_pct
+                                }
 
-                            continue  # Pular resto do ciclo após promoção
+                                self._salvar_estado_stops()
+
+                                # Notificar
+                                if self.notifier:
+                                    self.notifier.enviar_sucesso(
+                                        f"🎯 Stop Promovido [Giro Rápido]",
+                                        f"SL Inicial → Trailing Stop Loss\n"
+                                        f"Lucro mínimo atingido: {lucro_pct:+.2f}% (gatilho: {tsl_gatilho_lucro:.2f}%)\n"
+                                        f"Preço atual: ${preco_atual:.6f}\n"
+                                        f"TSL Nível: ${nivel_tsl_inicial:.6f}\n"
+                                        f"TSL Distância: {distancia_tsl_pct:.2f}%"
+                                    )
+
+                                continue  # Pular resto do ciclo após promoção
 
         # Calcular distância da SMA
         distancia_sma = self._calcular_distancia_sma(preco_atual)

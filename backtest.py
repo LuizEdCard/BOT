@@ -226,18 +226,23 @@ def aplicar_overrides_timeframes(config_bot: Dict[str, Any], overrides: Dict[str
         Configuração atualizada
     """
     if 'dca_sma_timeframe' in overrides:
-        timeframe = overrides['dca_sma_timeframe']
+        timeframe = overrides['dca_sma_timeframe'].lower()  # Normalizar para lowercase
         # Converter timeframe para horas
         if timeframe.endswith('m'):
             horas = int(timeframe[:-1]) / 60
+            # Para timeframes em minutos, usar no mínimo 1 hora
+            horas_final = max(1, int(horas) if horas >= 1 else 1)
         elif timeframe.endswith('h'):
             horas = int(timeframe[:-1])
+            horas_final = int(horas)
         elif timeframe.endswith('d'):
             horas = int(timeframe[:-1]) * 24
+            horas_final = int(horas)
         else:
-            horas = 1
-        
-        config_bot['INTERVALO_ATUALIZACAO_SMA_HORAS'] = int(horas) if horas >= 1 else 1
+            # Timeframe inválido - padrão é 1 hora
+            horas_final = 1
+
+        config_bot['INTERVALO_ATUALIZACAO_SMA_HORAS'] = horas_final
     
     if 'dca_rsi_timeframe' in overrides:
         config_bot['rsi_timeframe'] = overrides['dca_rsi_timeframe']
@@ -255,71 +260,73 @@ def aplicar_overrides_timeframes(config_bot: Dict[str, Any], overrides: Dict[str
     return config_bot
 
 
-def perguntar_parametros_dca(config_bot: Dict[str, Any]) -> Dict[str, Any]:
+def perguntar_parametros_dca(config_bot: Dict[str, Any]) -> None:
     """
     Pergunta ao usuário sobre os parâmetros da estratégia DCA.
-    
+    Atualiza config_bot DIRETAMENTE e IMEDIATAMENTE após cada resposta.
+
     Args:
-        config_bot: Configuração carregada do arquivo JSON
-        
-    Returns:
-        Dicionário com os parâmetros modificados
+        config_bot: Configuração carregada do arquivo JSON (será modificada)
     """
     print("\n" + "="*80)
     print("📊 CONFIGURAÇÃO DE PARÂMETROS - DCA (ACUMULAÇÃO)")
     print("="*80)
-    
-    params = {}
-    
+
     # 1. Filtro RSI
     usar_rsi_atual = config_bot.get('usar_filtro_rsi', False)
     usar_rsi = questionary.confirm(
         f"Ativar filtro RSI do DCA? (atual: {'Sim' if usar_rsi_atual else 'Não'})",
         default=usar_rsi_atual
     ).ask()
-    
-    if usar_rsi is not None:
-        params['usar_filtro_rsi'] = usar_rsi
-        
-        if usar_rsi:
-            # Limite do RSI
-            rsi_limite_atual = config_bot.get('rsi_limite_compra', 35)
-            rsi_limite_str = questionary.text(
-                f"Qual o limite do RSI para compra? (atual: {rsi_limite_atual})",
-                default=str(rsi_limite_atual),
-                validate=lambda t: validar_numero(t) or "Digite um número válido"
-            ).ask()
 
-            if rsi_limite_str is None:
-                print("❌ Configuração cancelada pelo usuário.")
-                return {}
-            if rsi_limite_str:
-                params['rsi_limite_compra'] = float(rsi_limite_str)
-            
-            # Timeframe do RSI
-            timeframes_choices = listar_timeframes_disponiveis()
-            rsi_tf_atual = config_bot.get('rsi_timeframe', '1h')
-            default_idx = next((i for i, c in enumerate(timeframes_choices) if c.value == rsi_tf_atual), 4)
-            
-            rsi_tf = questionary.select(
-                f"Qual o timeframe do RSI? (atual: {rsi_tf_atual})",
-                choices=timeframes_choices,
-                default=timeframes_choices[default_idx]
-            ).ask()
+    if usar_rsi is None:
+        print("❌ Configuração cancelada pelo usuário.")
+        return
 
-            if rsi_tf is None:
-                print("❌ Configuração cancelada pelo usuário.")
-                return {}
-            if rsi_tf:
-                params['rsi_timeframe'] = rsi_tf
-    
+    # ✅ ATUALIZAR DIRETAMENTE config_bot
+    config_bot['usar_filtro_rsi'] = usar_rsi
+
+    if usar_rsi:
+        # Limite do RSI
+        rsi_limite_atual = config_bot.get('rsi_limite_compra', 35)
+        rsi_limite_str = questionary.text(
+            f"Qual o limite do RSI para compra? (atual: {rsi_limite_atual})",
+            default=str(rsi_limite_atual),
+            validate=lambda t: validar_numero(t) or "Digite um número válido"
+        ).ask()
+
+        if rsi_limite_str is None:
+            print("❌ Configuração cancelada pelo usuário.")
+            return
+
+        # ✅ ATUALIZAR DIRETAMENTE config_bot
+        config_bot['rsi_limite_compra'] = float(rsi_limite_str)
+
+        # Timeframe do RSI
+        timeframes_choices = listar_timeframes_disponiveis()
+        rsi_tf_atual = config_bot.get('rsi_timeframe', '1h')
+        default_idx = next((i for i, c in enumerate(timeframes_choices) if c.value == rsi_tf_atual), 4)
+
+        rsi_tf = questionary.select(
+            f"Qual o timeframe do RSI? (atual: {rsi_tf_atual})",
+            choices=timeframes_choices,
+            default=timeframes_choices[default_idx]
+        ).ask()
+
+        if rsi_tf is None:
+            print("❌ Configuração cancelada pelo usuário.")
+            return
+
+        # ✅ ATUALIZAR DIRETAMENTE config_bot
+        config_bot['rsi_timeframe'] = rsi_tf
+
     # 2. Timeframe da SMA
     intervalo_sma_atual = config_bot.get('INTERVALO_ATUALIZACAO_SMA_HORAS', 4)
     tf_sma_atual = f"{intervalo_sma_atual}h" if intervalo_sma_atual < 24 else f"{intervalo_sma_atual // 24}d"
-    
+
     timeframes_choices = listar_timeframes_disponiveis()
     default_idx_sma = next((i for i, c in enumerate(timeframes_choices) if c.value == tf_sma_atual), 5)
-    
+
     tf_sma = questionary.select(
         f"Qual o timeframe da SMA de referência? (atual: {tf_sma_atual})",
         choices=timeframes_choices,
@@ -328,19 +335,21 @@ def perguntar_parametros_dca(config_bot: Dict[str, Any]) -> Dict[str, Any]:
 
     if tf_sma is None:
         print("❌ Configuração cancelada pelo usuário.")
-        return {}
-    if tf_sma:
-        # Converter para horas
-        if tf_sma.endswith('m'):
-            horas = int(tf_sma[:-1]) / 60
-        elif tf_sma.endswith('h'):
-            horas = int(tf_sma[:-1])
-        elif tf_sma.endswith('d'):
-            horas = int(tf_sma[:-1]) * 24
-        else:
-            horas = 1
-        params['INTERVALO_ATUALIZACAO_SMA_HORAS'] = int(horas) if horas >= 1 else 1
-    
+        return
+
+    # Converter para horas
+    if tf_sma.endswith('m'):
+        horas = int(tf_sma[:-1]) / 60
+    elif tf_sma.endswith('h'):
+        horas = int(tf_sma[:-1])
+    elif tf_sma.endswith('d'):
+        horas = int(tf_sma[:-1]) * 24
+    else:
+        horas = 1
+
+    # ✅ ATUALIZAR DIRETAMENTE config_bot
+    config_bot['INTERVALO_ATUALIZACAO_SMA_HORAS'] = int(horas) if horas >= 1 else 1
+
     # 3. Percentual Mínimo de Melhora do PM
     pm_melhora_atual = config_bot.get('PERCENTUAL_MINIMO_MELHORA_PM', 1.25)
     pm_melhora_str = questionary.text(
@@ -351,13 +360,17 @@ def perguntar_parametros_dca(config_bot: Dict[str, Any]) -> Dict[str, Any]:
 
     if pm_melhora_str is None:
         print("❌ Configuração cancelada pelo usuário.")
-        return {}
-    if pm_melhora_str:
-        params['PERCENTUAL_MINIMO_MELHORA_PM'] = float(pm_melhora_str)
-    
+        return
+
+    # ✅ ATUALIZAR DIRETAMENTE config_bot
+    config_bot['PERCENTUAL_MINIMO_MELHORA_PM'] = float(pm_melhora_str)
+
     # 4. Gestão de Saída (Stops)
-    gestao_saida = config_bot.get('gestao_saida_acumulacao', {})
-    
+    if 'gestao_saida_acumulacao' not in config_bot:
+        config_bot['gestao_saida_acumulacao'] = {}
+
+    gestao_saida = config_bot['gestao_saida_acumulacao']
+
     tsl_dist_atual = gestao_saida.get('trailing_stop_distancia_pct', 2.0)
     tsl_dist_str = questionary.text(
         f"Qual a distância do Trailing Stop Loss (%)? (atual: {tsl_dist_atual}%)",
@@ -367,12 +380,11 @@ def perguntar_parametros_dca(config_bot: Dict[str, Any]) -> Dict[str, Any]:
 
     if tsl_dist_str is None:
         print("❌ Configuração cancelada pelo usuário.")
-        return {}
-    if tsl_dist_str:
-        if 'gestao_saida_acumulacao' not in params:
-            params['gestao_saida_acumulacao'] = gestao_saida.copy()
-        params['gestao_saida_acumulacao']['trailing_stop_distancia_pct'] = float(tsl_dist_str)
-    
+        return
+
+    # ✅ ATUALIZAR DIRETAMENTE config_bot
+    gestao_saida['trailing_stop_distancia_pct'] = float(tsl_dist_str)
+
     sl_catastrofico_atual = gestao_saida.get('stop_loss_catastrofico_pct', 10.0)
     sl_catastrofico_str = questionary.text(
         f"Qual o Stop Loss catastrófico (%)? (atual: {sl_catastrofico_atual}%)",
@@ -382,174 +394,207 @@ def perguntar_parametros_dca(config_bot: Dict[str, Any]) -> Dict[str, Any]:
 
     if sl_catastrofico_str is None:
         print("❌ Configuração cancelada pelo usuário.")
-        return {}
-    if sl_catastrofico_str:
-        if 'gestao_saida_acumulacao' not in params:
-            params['gestao_saida_acumulacao'] = gestao_saida.copy()
-        params['gestao_saida_acumulacao']['stop_loss_catastrofico_pct'] = float(sl_catastrofico_str)
-    
-    return params
+        return
+
+    # ✅ ATUALIZAR DIRETAMENTE config_bot
+    gestao_saida['stop_loss_catastrofico_pct'] = float(sl_catastrofico_str)
 
 
-def perguntar_parametros_giro_rapido(config_bot: Dict[str, Any]) -> Dict[str, Any]:
+def perguntar_parametros_giro_rapido(config_bot: Dict[str, Any]) -> None:
     """
-    Pergunta ao usuário sobre os parâmetros da estratégia Giro Rápido.
-    
+    Pergunta ao usuário sobre os parâmetros da estratégia Giro Rápido v3.0.
+    Atualiza config_bot DIRETAMENTE e IMEDIATAMENTE após cada resposta.
+
+    Interface Melhorada:
+    - Agrupa parâmetros por categoria
+    - Oferece visualização clara dos valores atuais
+    - Informações contextuais para cada parâmetro
+    - ATUALIZA config_bot IMEDIATAMENTE (não usa dicts intermediários)
+
     Args:
-        config_bot: Configuração carregada do arquivo JSON
-        
-    Returns:
-        Dicionário com os parâmetros modificados
+        config_bot: Configuração carregada do arquivo JSON (será modificada)
     """
     print("\n" + "="*80)
-    print("💨 CONFIGURAÇÃO DE PARÂMETROS - GIRO RÁPIDO (SWING TRADE)")
+    print("💨 CONFIGURAÇÃO DE PARÂMETROS - GIRO RÁPIDO (SWING TRADE v3.0)")
     print("="*80)
-    
-    params = {}
-    estrategia_giro = config_bot.get('estrategia_giro_rapido', {})
-    
-    # 1. Timeframe Principal
-    tf_atual = estrategia_giro.get('timeframe', '15m')
-    timeframes_choices = listar_timeframes_disponiveis()
-    default_idx = next((i for i, c in enumerate(timeframes_choices) if c.value == tf_atual), 2)
-    
-    tf_giro = questionary.select(
-        f"Qual o timeframe principal do Giro Rápido? (atual: {tf_atual})",
-        choices=timeframes_choices,
-        default=timeframes_choices[default_idx]
-    ).ask()
+    print("""
+    ARQUITETURA: Stop Promovido com Separação de Responsabilidades
 
-    if tf_giro is None:
-        print("❌ Configuração cancelada pelo usuário.")
-        return {}
-    if tf_giro:
-        params['timeframe'] = tf_giro
-    
-    # 2. Gatilho de Compra
-    gatilho_atual = estrategia_giro.get('gatilho_compra_pct', 2.0)
-    gatilho_str = questionary.text(
-        f"Qual o gatilho de compra (% de queda)? (atual: {gatilho_atual}%)",
-        default=str(gatilho_atual),
-        validate=lambda t: validar_float(t) or "Digite um número válido >= 0"
-    ).ask()
+    ✅ ENTRADA: Baseada em RSI (Relative Strength Index)
+    ✅ SAÍDA: 100% gerenciada pelo BotWorker
+       - Fase 1: Stop Loss Inicial após compra
+       - Fase 2: Promoção para TSL com gatilho de lucro mínimo (v3.0)
+       - Fase 3: TSL segue preço dinamicamente
+    """)
 
-    if gatilho_str is None:
-        print("❌ Configuração cancelada pelo usuário.")
-        return {}
-    if gatilho_str:
-        params['gatilho_compra_pct'] = float(gatilho_str)
-    
-    # 3. Filtro RSI de Entrada
+    # Garantir que a estrutura existe
+    if 'estrategia_giro_rapido' not in config_bot:
+        config_bot['estrategia_giro_rapido'] = {}
+
+    estrategia_giro = config_bot['estrategia_giro_rapido']
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SEÇÃO 1: PARÂMETROS DE ENTRADA (RSI)
+    # ═══════════════════════════════════════════════════════════════════════════
+    print("\n" + "─"*80)
+    print("📊 PARÂMETROS DE ENTRADA (RSI)")
+    print("─"*80)
+
+    # 1. Filtro RSI (SIM/NÃO)
     usar_rsi_atual = estrategia_giro.get('usar_filtro_rsi_entrada', True)
+    print(f"\n   RSI Ativo? (atual: {'✅ Sim' if usar_rsi_atual else '❌ Não'})")
     usar_rsi = questionary.confirm(
-        f"Ativar filtro RSI de entrada? (atual: {'Sim' if usar_rsi_atual else 'Não'})",
+        "   Usar RSI como filtro de entrada?",
         default=usar_rsi_atual
     ).ask()
-    
-    if usar_rsi is not None:
-        params['usar_filtro_rsi_entrada'] = usar_rsi
-        
-        if usar_rsi:
-            # Limite do RSI
-            rsi_limite_atual = estrategia_giro.get('rsi_limite_compra', 30)
-            rsi_limite_str = questionary.text(
-                f"Qual o limite do RSI de entrada? (atual: {rsi_limite_atual})",
-                default=str(rsi_limite_atual),
-                validate=lambda t: validar_numero(t) or "Digite um número válido"
-            ).ask()
 
-            if rsi_limite_str is None:
-                print("❌ Configuração cancelada pelo usuário.")
-                return {}
-            if rsi_limite_str:
-                params['rsi_limite_compra'] = float(rsi_limite_str)
-            
-            # Timeframe do RSI
-            rsi_tf_atual = estrategia_giro.get('rsi_timeframe_entrada', '15m')
-            default_idx_rsi = next((i for i, c in enumerate(timeframes_choices) if c.value == rsi_tf_atual), 2)
-            
-            rsi_tf = questionary.select(
-                f"Qual o timeframe do RSI de entrada? (atual: {rsi_tf_atual})",
-                choices=timeframes_choices,
-                default=timeframes_choices[default_idx_rsi]
-            ).ask()
+    if usar_rsi is None:
+        print("❌ Configuração cancelada pelo usuário.")
+        return
 
-            if rsi_tf is None:
-                print("❌ Configuração cancelada pelo usuário.")
-                return {}
-            if rsi_tf:
-                params['rsi_timeframe_entrada'] = rsi_tf
-    
-    # 4. Stop Loss Inicial
+    # ✅ ATUALIZAR DIRETAMENTE config_bot
+    estrategia_giro['usar_filtro_rsi_entrada'] = usar_rsi
+    status_rsi = "✅ Ativado" if usar_rsi else "❌ Desativado"
+    print(f"   Filtro RSI: {status_rsi}")
+
+    if usar_rsi:
+        # 2a. Limite do RSI (número)
+        rsi_limite_atual = estrategia_giro.get('rsi_limite_compra', 30)
+        print(f"\n   RSI Limite de Compra? (atual: {rsi_limite_atual})")
+        print("   ℹ️  Compra quando RSI < este valor (sobrevenda)")
+        rsi_limite_str = questionary.text(
+            "   Qual o limite do RSI? (0-100):",
+            default=str(rsi_limite_atual),
+            validate=lambda t: validar_numero(t) or "Digite um número válido (0-100)"
+        ).ask()
+
+        if rsi_limite_str is None:
+            print("❌ Configuração cancelada pelo usuário.")
+            return
+
+        # ✅ ATUALIZAR DIRETAMENTE config_bot
+        estrategia_giro['rsi_limite_compra'] = float(rsi_limite_str)
+        print(f"   ✅ RSI Limite: {rsi_limite_str}")
+
+        # 2b. Timeframe do RSI (seleção)
+        rsi_tf_atual = estrategia_giro.get('rsi_timeframe_entrada', '15m')
+        timeframes_choices = listar_timeframes_disponiveis()
+        default_idx_rsi = next((i for i, c in enumerate(timeframes_choices) if c.value == rsi_tf_atual), 2)
+
+        print(f"\n   Timeframe do RSI? (atual: {rsi_tf_atual})")
+        print("   ℹ️  Período usado para calcular RSI")
+        rsi_tf = questionary.select(
+            "   Selecione o timeframe:",
+            choices=timeframes_choices,
+            default=timeframes_choices[default_idx_rsi]
+        ).ask()
+
+        if rsi_tf is None:
+            print("❌ Configuração cancelada pelo usuário.")
+            return
+
+        # ✅ ATUALIZAR DIRETAMENTE config_bot
+        estrategia_giro['rsi_timeframe_entrada'] = rsi_tf
+        print(f"   ✅ Timeframe RSI: {rsi_tf}")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SEÇÃO 2: PARÂMETROS DE SAÍDA (Stop Promovido)
+    # ═══════════════════════════════════════════════════════════════════════════
+    print("\n" + "─"*80)
+    print("🛡️  PARÂMETROS DE SAÍDA (STOP PROMOVIDO)")
+    print("─"*80)
+
+    # 3. Stop Loss Inicial (número)
     sl_inicial_atual = estrategia_giro.get('stop_loss_inicial_pct', 2.5)
+    print(f"\n   Stop Loss Inicial? (atual: {sl_inicial_atual}%)")
+    print("   ℹ️  Proteção após compra - ativado automaticamente")
+    print("   Exemplo: Compra $1.00 → SL em $0.975 (-2.5%)")
     sl_inicial_str = questionary.text(
-        f"Qual o Stop Loss inicial (%)? (atual: {sl_inicial_atual}%)",
+        "   Qual o Stop Loss inicial (%):",
         default=str(sl_inicial_atual),
         validate=lambda t: validar_float(t) or "Digite um número válido >= 0"
     ).ask()
 
     if sl_inicial_str is None:
         print("❌ Configuração cancelada pelo usuário.")
-        return {}
-    if sl_inicial_str:
-        params['stop_loss_inicial_pct'] = float(sl_inicial_str)
-    
-    # 5. Distância do Trailing Stop
+        return
+
+    # ✅ ATUALIZAR DIRETAMENTE config_bot
+    estrategia_giro['stop_loss_inicial_pct'] = float(sl_inicial_str)
+    print(f"   ✅ Stop Loss Inicial: {sl_inicial_str}%")
+
+    # 4. Trailing Stop (número)
     tsl_dist_atual = estrategia_giro.get('trailing_stop_distancia_pct', 0.8)
+    print(f"\n   Trailing Stop Distance? (atual: {tsl_dist_atual}%)")
+    print("   ℹ️  Distância TSL do pico - ativado quando gatilho de lucro é atingido")
+    print("   Exemplo: Pico $1.010 → TSL em $1.002 (-0.8%)")
     tsl_dist_str = questionary.text(
-        f"Qual a distância do Trailing Stop (%)? (atual: {tsl_dist_atual}%)",
+        "   Qual a distância do TSL (%):",
         default=str(tsl_dist_atual),
         validate=lambda t: validar_float(t) or "Digite um número válido >= 0"
     ).ask()
 
     if tsl_dist_str is None:
         print("❌ Configuração cancelada pelo usuário.")
-        return {}
-    if tsl_dist_str:
-        params['trailing_stop_distancia_pct'] = float(tsl_dist_str)
-    
-    # 6. Alocação de Capital
+        return
+
+    # ✅ ATUALIZAR DIRETAMENTE config_bot
+    estrategia_giro['trailing_stop_distancia_pct'] = float(tsl_dist_str)
+    print(f"   ✅ Trailing Stop Distance: {tsl_dist_str}%")
+
+    # 4.5 Gatilho de Lucro para Promoção SL → TSL (número) - NOVO!
+    tsl_gatilho_atual = estrategia_giro.get('tsl_gatilho_lucro_pct', 1.5)
+    print(f"\n   TSL Gatilho de Lucro? (atual: {tsl_gatilho_atual}%)")
+    print("   ℹ️  Lucro mínimo (%) necessário para promover Stop Loss → Trailing Stop Loss")
+    print("   ⚠️  ANTES: Promovia no breakeven (0%), causando muitos ganhos pequenos")
+    print("   ✅ AGORA: Promove apenas com lucro mínimo garantido")
+    print("   Exemplos de valores:")
+    print("      • 0.5%  → Agressivo (promove rápido, mas com pouco lucro garantido)")
+    print("      • 1.0%  → Moderado-agressivo")
+    print("      • 1.5%  → Moderado (padrão, melhor balanço)")
+    print("      • 2.0%  → Moderado-conservador")
+    print("      • 2.5%  → Conservador (promove devagar, lucro garantido alto)")
+    tsl_gatilho_str = questionary.text(
+        "   Qual o lucro mínimo para promover SL → TSL (%):",
+        default=str(tsl_gatilho_atual),
+        validate=lambda t: validar_float(t) or "Digite um número válido >= 0"
+    ).ask()
+
+    if tsl_gatilho_str is None:
+        print("❌ Configuração cancelada pelo usuário.")
+        return
+
+    # ✅ ATUALIZAR DIRETAMENTE config_bot
+    estrategia_giro['tsl_gatilho_lucro_pct'] = float(tsl_gatilho_str)
+    print(f"   ✅ TSL Gatilho de Lucro: {tsl_gatilho_str}%")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SEÇÃO 3: GERENCIAMENTO DE CAPITAL
+    # ═══════════════════════════════════════════════════════════════════════════
+    print("\n" + "─"*80)
+    print("💰 GERENCIAMENTO DE CAPITAL")
+    print("─"*80)
+
+    # 5. Alocação de Capital (número)
     alocacao_atual = estrategia_giro.get('alocacao_capital_pct', 20)
+    print(f"\n   Alocação de Capital? (atual: {alocacao_atual}%)")
+    print("   ℹ️  Porcentagem do capital total para Giro Rápido")
+    print("   Exemplo: $1000 × 20% = $200 disponível para trade")
     alocacao_str = questionary.text(
-        f"Qual o % de capital para Giro Rápido? (atual: {alocacao_atual}%)",
+        "   Qual o % de capital para Giro Rápido:",
         default=str(alocacao_atual),
         validate=lambda t: validar_float(t) or "Digite um número válido >= 0"
     ).ask()
 
     if alocacao_str is None:
         print("❌ Configuração cancelada pelo usuário.")
-        return {}
-    if alocacao_str:
-        params['alocacao_capital_pct'] = float(alocacao_str)
-    
-    return params
+        return
 
+    # ✅ ATUALIZAR DIRETAMENTE config_bot
+    estrategia_giro['alocacao_capital_pct'] = float(alocacao_str)
+    print(f"   ✅ Alocação de Capital: {alocacao_str}%")
 
-def aplicar_parametros_estrategias(config_bot: Dict[str, Any], params_dca: Dict[str, Any], params_giro: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Aplica os parâmetros personalizados nas estratégias.
-    
-    Args:
-        config_bot: Configuração original
-        params_dca: Parâmetros personalizados do DCA
-        params_giro: Parâmetros personalizados do Giro Rápido
-        
-    Returns:
-        Configuração atualizada
-    """
-    # Aplicar parâmetros do DCA
-    for key, value in params_dca.items():
-        config_bot[key] = value
-    
-    # Aplicar parâmetros do Giro Rápido
-    if params_giro:
-        if 'estrategia_giro_rapido' not in config_bot:
-            config_bot['estrategia_giro_rapido'] = {}
-        
-        for key, value in params_giro.items():
-            config_bot['estrategia_giro_rapido'][key] = value
-    
-    return config_bot
+    print("\n" + "="*80)
 
 
 def imprimir_resumo_parametros(config_bot: Dict[str, Any], estrategias_selecionadas: list):
@@ -583,7 +628,7 @@ def imprimir_resumo_parametros(config_bot: Dict[str, Any], estrategias_seleciona
     # Giro Rápido
     giro_ativo = 'giro_rapido' in estrategias_selecionadas or 'ambas' in estrategias_selecionadas
     if giro_ativo:
-        print("\n      💨 Giro Rápido (Swing Trade):")
+        print("\n      💨 Giro Rápido (Swing Trade v3.0):")
         estrategia_giro = config_bot.get('estrategia_giro_rapido', {})
         print(f"         Timeframe Principal: {estrategia_giro.get('timeframe', '15m')}")
         print(f"         Gatilho de Compra: {estrategia_giro.get('gatilho_compra_pct', 2.0)}%")
@@ -592,7 +637,8 @@ def imprimir_resumo_parametros(config_bot: Dict[str, Any], estrategias_seleciona
             print(f"         RSI Limite: {estrategia_giro.get('rsi_limite_compra', 30)}")
             print(f"         RSI Timeframe: {estrategia_giro.get('rsi_timeframe_entrada', '15m')}")
         print(f"         Stop Loss Inicial: {estrategia_giro.get('stop_loss_inicial_pct', 2.5)}%")
-        print(f"         Trailing Stop: {estrategia_giro.get('trailing_stop_distancia_pct', 0.8)}%")
+        print(f"         Trailing Stop Distance: {estrategia_giro.get('trailing_stop_distancia_pct', 0.8)}%")
+        print(f"         TSL Gatilho de Lucro: {estrategia_giro.get('tsl_gatilho_lucro_pct', 1.5)}% (NEW)")
         print(f"         Alocação de Capital: {estrategia_giro.get('alocacao_capital_pct', 20)}%")
 
 
@@ -642,36 +688,108 @@ def calcular_benchmark_buy_hold(dados_csv: str, saldo_inicial: float, taxa_pct: 
     }
 
 
-def analisar_saidas_por_motivo(trades: list) -> Dict[str, int]:
+def analisar_saidas_por_motivo(trades: list) -> Dict[str, Any]:
     """
-    Analisa os trades de venda e conta quantos foram por cada motivo
-    
+    Analisa os trades de venda com detalhes de lucro/prejuízo por motivo de saída
+
+    Estratégia de matching: Como não há um campo 'id_compra' explícito nos trades,
+    usamos FIFO (First In First Out) - cada venda é vinculada à compra não-fechada mais antiga.
+
     Args:
-        trades: Lista de trades executados
-        
+        trades: Lista de trades executados (em ordem cronológica)
+
     Returns:
-        Dicionário com contagem por motivo de saída
+        Dicionário com contagem e análise de lucro/prejuízo por motivo
     """
     saidas = {
-        'Stop Loss (SL)': 0,
-        'Trailing Stop Loss (TSL)': 0,
-        'Meta de Lucro': 0,
-        'Outros': 0
+        'Stop Loss (SL)': {
+            'count': 0,
+            'lucro_total': Decimal('0'),
+            'lucro_lista': [],
+            'trades': []
+        },
+        'Trailing Stop Loss (TSL)': {
+            'count': 0,
+            'lucro_total': Decimal('0'),
+            'lucro_lista': [],
+            'trades': []
+        },
+        'Meta de Lucro': {
+            'count': 0,
+            'lucro_total': Decimal('0'),
+            'lucro_lista': [],
+            'trades': []
+        },
+        'Outros': {
+            'count': 0,
+            'lucro_total': Decimal('0'),
+            'lucro_lista': [],
+            'trades': []
+        }
     }
-    
+
+    # Rastrear posições abertas por carteira usando FIFO
+    # Estrutura: { 'carteira': [{'preco': float, 'quantidade': float, 'custo_total': Decimal}, ...] }
+    posicoes_abertas = {}
+
+    # Iterar sobre trades em ordem cronológica (FIFO)
     for trade in trades:
-        if trade.get('tipo') == 'venda':
+        carteira = trade.get('carteira', 'giro_rapido')
+        tipo = trade.get('tipo', '')
+
+        if tipo == 'compra':
+            # Adicionar à posição aberta
+            if carteira not in posicoes_abertas:
+                posicoes_abertas[carteira] = []
+
+            # Armazenar info da compra
+            compra_info = {
+                'preco': Decimal(str(trade.get('preco', 0))),
+                'quantidade': Decimal(str(trade.get('quantidade_ativo', 0))),
+                'custo_total': Decimal(str(trade.get('quantidade_usdt', 0))),
+                'timestamp': trade.get('timestamp', '')
+            }
+            posicoes_abertas[carteira].append(compra_info)
+
+        elif tipo == 'venda':
             motivo = trade.get('motivo', '').lower()
-            
+
+            # Determinar categoria de saída
             if 'stop loss' in motivo and 'trailing' not in motivo:
-                saidas['Stop Loss (SL)'] += 1
+                categoria = 'Stop Loss (SL)'
             elif 'trailing' in motivo or 'tsl' in motivo:
-                saidas['Trailing Stop Loss (TSL)'] += 1
+                categoria = 'Trailing Stop Loss (TSL)'
             elif 'meta' in motivo or 'lucro' in motivo or 'venda' in motivo:
-                saidas['Meta de Lucro'] += 1
+                categoria = 'Meta de Lucro'
             else:
-                saidas['Outros'] += 1
-    
+                categoria = 'Outros'
+
+            saidas[categoria]['count'] += 1
+            saidas[categoria]['trades'].append(trade)
+
+            # Calcular lucro/prejuízo usando FIFO
+            try:
+                receita = Decimal(str(trade.get('receita_usdt', 0)))
+                quantidade_venda = Decimal(str(trade.get('quantidade_ativo', 0)))
+
+                # Buscar posições abertas para esta carteira
+                if carteira in posicoes_abertas and posicoes_abertas[carteira]:
+                    # Vincular à compra mais antiga (FIFO)
+                    compra_info = posicoes_abertas[carteira][0]
+
+                    # Calcular lucro/prejuízo
+                    # lucro = receita_total - custo_total
+                    lucro = receita - compra_info['custo_total']
+
+                    saidas[categoria]['lucro_total'] += lucro
+                    saidas[categoria]['lucro_lista'].append(float(lucro))
+
+                    # Remover a posição fechada da lista (FIFO)
+                    posicoes_abertas[carteira].pop(0)
+            except Exception as e:
+                # Log silencioso de erros de parsing
+                pass
+
     return saidas
 
 
@@ -736,14 +854,26 @@ def imprimir_relatorio_final(resultados: Dict[str, Any], benchmark: Dict[str, fl
         volume_vendido = sum(v['receita_usdt'] for v in vendas)
         print(f"   Volume vendido: ${volume_vendido:.2f} USDT")
     
-    # Análise de saídas
+    # Análise de saídas com lucro/prejuízo por motivo
     if vendas:
-        print(f"\n🎯 Análise de Saídas:")
+        print(f"\n🎯 Análise de Saídas (Lucro/Prejuízo por Motivo):")
         saidas = analisar_saidas_por_motivo(trades)
-        for motivo, count in saidas.items():
+
+        for motivo in ['Stop Loss (SL)', 'Trailing Stop Loss (TSL)', 'Meta de Lucro', 'Outros']:
+            info = saidas[motivo]
+            count = info['count']
+
             if count > 0:
                 percentual = (count / len(vendas)) * 100
-                print(f"   {motivo}: {count} ({percentual:.1f}%)")
+                lucro_total = float(info['lucro_total'])
+                lucro_medio = lucro_total / count if count > 0 else 0
+                lucro_medio_pct = (lucro_medio / sum(c['quantidade_usdt'] for c in compras)) * 100 if compras else 0
+
+                # Exibição formatada
+                print(f"\n   {motivo}:")
+                print(f"      Quantidade: {count} ({percentual:.1f}%)")
+                print(f"      Lucro/Prejuízo Total: ${lucro_total:+.2f}")
+                print(f"      Lucro/Prejuízo Médio: ${lucro_medio:+.2f} ({lucro_medio_pct:+.2f}%)")
     
     # Benchmark Buy & Hold
     print(f"\n📊 Benchmark Buy & Hold:")
@@ -907,9 +1037,6 @@ def main():
     # 7. Perguntar sobre parâmetros das estratégias
     print("\n🔬 LABORATÓRIO DE OTIMIZAÇÃO DE PARÂMETROS")
     print("Você pode agora personalizar todos os parâmetros chave das estratégias...\n")
-    
-    params_dca = {}
-    params_giro = {}
 
     # Verificar quais estratégias foram selecionadas
     dca_selecionada = 'dca' in estrategias_selecionadas or 'ambas' in estrategias_selecionadas
@@ -918,23 +1045,19 @@ def main():
     # Se estivermos em modo não-interativo, não chamar os questionarios de parâmetros
     if dca_selecionada:
         if args.non_interactive:
-            # Usar valores já presentes em config (ou defaults)
-            params_dca = {}
             print("ℹ️ Modo não-interativo: pulando perguntas de parâmetros do DCA; usando valores do arquivo de configuração.")
         else:
-            params_dca = perguntar_parametros_dca(config)
+            # ✅ ATUALIZA config DIRETAMENTE (sem params intermediário)
+            perguntar_parametros_dca(config)
 
     # Perguntar parâmetros do Giro Rápido (ou pular em non-interactive)
     if giro_selecionado:
         if args.non_interactive:
-            params_giro = {}
             print("ℹ️ Modo não-interativo: pulando perguntas de parâmetros do Giro Rápido; usando valores do arquivo de configuração.")
         else:
-            params_giro = perguntar_parametros_giro_rapido(config)
-    
-    # Aplicar todos os parâmetros personalizados
-    config = aplicar_parametros_estrategias(config, params_dca, params_giro)
-    
+            # ✅ ATUALIZA config DIRETAMENTE (sem params intermediário)
+            perguntar_parametros_giro_rapido(config)
+
     # 8. Confirmação com resumo completo
     print("\n" + "="*80)
     print("📋 RESUMO FINAL DA CONFIGURAÇÃO")
@@ -969,9 +1092,37 @@ def main():
         print("❌ Backtest cancelado pelo usuário.")
         return
     
-    # 9. Executar simulação
-    print("\n🚀 Iniciando simulação...\n")
-    
+    # 9. VALIDAÇÃO CRÍTICA: Garantir que alocacao_capital_pct foi aplicada
+    print("\n" + "="*80)
+    print("🔍 VALIDAÇÃO PRÉ-SIMULAÇÃO: Verificando Configurações")
+    print("="*80)
+
+    # ✅ Validação 1: Verificar alocação de Giro Rápido
+    if giro_selecionado:
+        giro_config = config.get('estrategia_giro_rapido', {})
+        alocacao_giro = giro_config.get('alocacao_capital_pct', None)
+
+        if alocacao_giro is None:
+            print("\n❌ ERRO CRÍTICO: alocacao_capital_pct não foi configurada para Giro Rápido!")
+            print("   Causas possíveis:")
+            print("   1. perguntar_parametros_giro_rapido() não foi chamado")
+            print("   2. Usuário cancelou a configuração")
+            print("   3. Config não foi carregada corretamente")
+            print("\n   Abortando simulação...")
+            return
+        else:
+            print(f"   ✅ Giro Rápido - Alocação: {alocacao_giro}%")
+
+    # ✅ Validação 2: Verificar configurações do DCA
+    if dca_selecionada:
+        usar_rsi = config.get('usar_filtro_rsi', False)
+        print(f"   ✅ DCA - Filtro RSI: {'Ativado' if usar_rsi else 'Desativado'}")
+
+    print("\n✅ Todas as validações passaram! Prosseguindo com simulação...\n")
+
+    # 10. Executar simulação
+    print("🚀 Iniciando simulação...\n")
+
     try:
         # Calcular benchmark Buy & Hold
         print("📊 Calculando benchmark Buy & Hold...")
@@ -1032,7 +1183,12 @@ def main():
             taxa_pct=taxa,
             timeframe_base=timeframe_base
         )
-        
+
+        # DEBUG: Imprimir config de Giro Rápido antes de iniciar BotWorker
+        print("\n[DEBUG] Configuração de Giro Rápido ANTES de iniciar BotWorker:")
+        print(f"[DEBUG] config['estrategia_giro_rapido'] = {config.get('estrategia_giro_rapido', {})}")
+        print()
+
         # Instanciar BotWorker em modo simulação
         print("🤖 Inicializando BotWorker...")
         bot_worker = BotWorker(

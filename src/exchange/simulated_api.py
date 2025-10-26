@@ -284,10 +284,12 @@ class SimulatedExchangeAPI(ExchangeAPI):
             DataFrame resampleado com colunas OHLCV
         """
         # Converter timeframe para formato do pandas resample
-        # '1h' -> '1H', '4h' -> '4H', '1d' -> '1D'
-        timeframe_pandas = timeframe.upper().replace('H', 'h').replace('D', 'd')
-        if not timeframe_pandas.endswith(('h', 'd', 'H', 'D')):
-            timeframe_pandas = timeframe_pandas + 'h'
+        # Normalizar para lowercase (pandas aceita '1h', '4h', '1d', '30m', etc.)
+        timeframe_pandas = timeframe.lower()
+
+        # Validar formato - deve terminar com m, h, d, ou s
+        if not timeframe_pandas[-1] in ('m', 'h', 'd', 's'):
+            raise ValueError(f"Timeframe inválido: '{timeframe}'. Use: 1m, 5m, 15m, 30m, 1h, 4h, 1d, etc.")
         
         # Resamplear com as agregações corretas
         df_resampled = self.dados_completos.resample(timeframe_pandas).agg({

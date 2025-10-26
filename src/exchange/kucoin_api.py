@@ -250,14 +250,19 @@ class KucoinAPI(ExchangeAPI):
         for tentativa in range(max_retries):
             try:
                 kucoin_par = self._format_pair(simbolo)
+                # Normalizar intervalo para lowercase para garantir match
+                intervalo_normalized = intervalo.lower() if intervalo else intervalo
                 intervalo_map = {
                     '1m': '1min', '3m': '3min', '5m': '5min', '15m': '15min', '30m': '30min',
-                    '1h': '1hour', '2h': '2hour', '4h': '4hour', '6h': '6hour', 
+                    '1h': '1hour', '2h': '2hour', '4h': '4hour', '6h': '6hour',
                     '8h': '8hour', '12h': '12hour', '1d': '1day', '1w': '1week'
                 }
-                kline_type = intervalo_map.get(intervalo)
+                kline_type = intervalo_map.get(intervalo_normalized)
                 if not kline_type:
-                    raise ValueError(f"Intervalo '{intervalo}' não suportado pela KuCoin API.")
+                    raise ValueError(
+                        f"Intervalo '{intervalo}' não suportado pela KuCoin API. "
+                        f"Intervalos suportados: {', '.join(sorted(intervalo_map.keys()))}"
+                    )
 
                 start_at = int(inicio / 1000) if inicio else None
                 end_at = int(fim / 1000) if fim else None
@@ -294,10 +299,25 @@ class KucoinAPI(ExchangeAPI):
         return []
 
     def _intervalo_para_ms(self, intervalo: str) -> int:
+        """Converte intervalo (ex: 1h, 30m) para milissegundos."""
         multiplicadores = {'m': 60, 'h': 3600, 'd': 86400, 'w': 604800}
-        unidade = intervalo[-1]
-        valor = int(intervalo[:-1])
-        return valor * multiplicadores.get(unidade, 0) * 1000
+
+        # Normalizar para lowercase
+        intervalo_normalized = intervalo.lower().strip()
+        if not intervalo_normalized:
+            raise ValueError("Intervalo não pode estar vazio")
+
+        unidade = intervalo_normalized[-1]
+        try:
+            valor = int(intervalo_normalized[:-1])
+        except ValueError:
+            raise ValueError(f"Intervalo inválido: '{intervalo}'. Formato esperado: número + unidade (m/h/d/w)")
+
+        if unidade not in multiplicadores:
+            raise ValueError(f"Unidade desconhecida: '{unidade}' em '{intervalo}'. Use: m, h, d, ou w")
+
+        ms_per_unit = multiplicadores[unidade]
+        return valor * ms_per_unit * 1000
 
     def importar_historico_para_db(self, database_manager, par: str):
         max_retries = 3

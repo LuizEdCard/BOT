@@ -94,7 +94,16 @@ class StrategySwingTrade:
         # PARÂMETROS DE ENTRADA (RSI)
         # ═══════════════════════════════════════════════════════════════
         self.usar_filtro_rsi_entrada = self.estrategia_config.get('usar_filtro_rsi_entrada', True)
-        self.rsi_timeframe_entrada = self.estrategia_config.get('rsi_timeframe_entrada', '15m')
+
+        # Normalizar timeframe de RSI (pode estar em maiúsculo ou malformado)
+        rsi_tf_raw = self.estrategia_config.get('rsi_timeframe_entrada', '15m')
+        # Limpar timeframes malformados como "30Mh"
+        rsi_tf_cleaned = rsi_tf_raw.lower() if rsi_tf_raw else '15m'
+        # Se resultou em algo como "30mh", extrair apenas "30m"
+        if rsi_tf_cleaned.endswith('mh'):
+            rsi_tf_cleaned = rsi_tf_cleaned[:-1]  # Remove 'h' final
+        self.rsi_timeframe_entrada = rsi_tf_cleaned
+
         self.rsi_limite_compra = Decimal(str(self.estrategia_config.get('rsi_limite_compra', 30)))
 
         # ═══════════════════════════════════════════════════════════════
