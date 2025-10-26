@@ -104,6 +104,15 @@ class BotWorker:
 
         self.gestao_capital.configurar_alocacao_giro_rapido(alocacao_giro_pct)
         self.logger.info(f"✅ Alocação do Giro Rápido configurada: {alocacao_giro_pct}% do saldo livre")
+        # Se a API de exchange simulada suportar reconfiguração de alocação,
+        # propagar a configuração para o estado do simulador (crítico para backtests)
+        try:
+            if hasattr(self.exchange_api, 'reconfigurar_alocacao_inicial'):
+                # Passar percentual para a API simulada para redistribuir saldos
+                self.exchange_api.reconfigurar_alocacao_inicial(float(alocacao_giro_pct))
+                self.logger.info("🔁 Alocação inicial propagada para a exchange simulada")
+        except Exception as e:
+            self.logger.warning(f"⚠️ Não foi possível propagar alocação para a exchange: {e}")
 
         # Banco de dados e estado
         self.db = DatabaseManager(
@@ -161,6 +170,7 @@ class BotWorker:
         self.ultimo_backup = datetime.now()
         self.rodando = False
         self.inicio_bot = datetime.now()
+        self.ultimo_percentual_logado = -1
         
         # Tempo simulado para backtesting
         self.tempo_simulado_atual: Optional[datetime] = None
@@ -1429,8 +1439,30 @@ class BotWorker:
             self.logger.warning(f"⚠️ Não foi possível calcular SMA de referência antes da simulação: {e}")
         
         # Loop principal do backtest
+        total_passos = len(self.exchange_api.dados)
+        # Registrar snapshot inicial do portfólio (estado antes do primeiro candle)
+        try:
+            if hasattr(self.exchange_api, 'record_snapshot'):
+                # timestamp inicial: usar primeira barra disponível se possível
+                primeiro_ts = None
+                try:
+                    primeira_barra = self.exchange_api.dados.iloc[self.exchange_api.indice_atual]['timestamp'] if hasattr(self.exchange_api, 'dados') and len(self.exchange_api.dados) > self.exchange_api.indice_atual else None
+                    primeiro_ts = pd.to_datetime(primeira_barra) if primeira_barra is not None else None
+                except Exception:
+                    primeiro_ts = None
+                self.exchange_api.record_snapshot(timestamp=primeiro_ts.isoformat() if primeiro_ts is not None else None)
+        except Exception:
+            pass
+
         while self.rodando and (barra := self.exchange_api.get_barra_atual()) is not None:
             try:
+                # Log de progresso
+                passo_atual = self.exchange_api.indice_atual
+                percentual_atual = int((passo_atual / total_passos) * 100)
+                if percentual_atual > self.ultimo_percentual_logado:
+                    self.logger.info(f"⏳ Progresso do Backtest: {percentual_atual}% concluído...")
+                    self.ultimo_percentual_logado = percentual_atual
+
                 # TEMPO SIMULADO: Capturar timestamp da barra
                 tempo_simulado = pd.to_datetime(barra['timestamp'])
                 preco_atual = Decimal(str(barra['close']))
@@ -1438,6 +1470,14 @@ class BotWorker:
                 # Executa o ciclo de decisão com os dados e tempo da simulação
                 # Passando tempo_simulado para todas as funções que verificam cooldowns
                 self._executar_ciclo_decisao(preco_atual, tempo_simulado)
+
+                # Registrar snapshot do portfólio após o ciclo de decisão (se disponível)
+                try:
+                    if hasattr(self.exchange_api, 'record_snapshot'):
+                        # Passar timestamp em isoformat para maior interoperabilidade
+                        self.exchange_api.record_snapshot(timestamp=tempo_simulado.isoformat())
+                except Exception as e:
+                    self.logger.debug(f"⚠️ Falha ao gravar snapshot no simulador: {e}")
 
             except KeyboardInterrupt:
                 self.logger.info("🛑 Interrupção solicitada pelo usuário durante a simulação.")

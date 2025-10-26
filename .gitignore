@@ -122,3 +122,4 @@ Thumbs.db
 !config/.env.example
 !dados/.gitkeep
 !logs/.gitkeep
+tmp/

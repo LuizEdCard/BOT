@@ -115,7 +115,10 @@ class StrategySwingTrade:
         # Estado interno
         self.ultima_compra_timestamp: Optional[float] = None
         self.cooldown_segundos: int = self.estrategia_config.get('cooldown_compra_segundos', 60)
+        # Track last known position status so we only log on changes
         self.ultima_log_status: Optional[float] = None
+        self.ultimo_status_posicao: Optional[bool] = None
+        self.notificou_esperando_rsi: bool = False
 
         # Configurar alocação na gestão de capital
         self.gestao_capital.configurar_alocacao_giro_rapido(self.alocacao_capital_pct)
@@ -155,17 +158,16 @@ class StrategySwingTrade:
         # SEM POSIÇÃO: Verificar oportunidade de COMPRA
         # ═══════════════════════════════════════════════════════════════
 
-        # Log de estado a cada 60 segundos
-        import time
-        agora_timestamp = tempo_atual if tempo_atual is not None else time.time()
-        if self.ultima_log_status is None or (agora_timestamp - self.ultima_log_status) >= 60:
-            quantidade = self.position_manager.get_quantidade_total('giro_rapido')
+        # Log de estado apenas quando houver mudança de status (posse/sem posse)
+        quantidade = self.position_manager.get_quantidade_total('giro_rapido')
+        if self.ultimo_status_posicao is None or (tem_posicao != self.ultimo_status_posicao):
+            # Logamos somente quando o estado da posição muda (ex.: abriu ou fechou)
             self.logger.info(
                 f"📊 Giro Rápido | Preço: ${preco_atual:.6f} | "
                 f"Posição: {quantidade:.4f} | "
                 f"Status: {'COM posição' if tem_posicao else 'SEM posição'}"
             )
-            self.ultima_log_status = agora_timestamp
+            self.ultimo_status_posicao = tem_posicao
 
         # VERIFICAR COOLDOWN: Evitar múltiplas compras em sequência rápida
         if self.ultima_compra_timestamp is not None:
@@ -202,12 +204,8 @@ class StrategySwingTrade:
             f"[SwingTrade] Verificando entrada: RSI={rsi_atual:.2f}, Limite={self.rsi_limite_compra:.2f}"
         )
 
-        # Log sobre o RSI (usando INFO para garantir visibilidade)
-        self.logger.info(
-            f"📊 Giro Rápido | RSI: {rsi_atual:.2f} | "
-            f"Limite: {self.rsi_limite_compra:.2f} | "
-            f"Gatilho: {'SIM ✓' if rsi_atual < self.rsi_limite_compra else 'NÃO ✗'}"
-        )
+        # Não logar RSI em INFO a cada verificação para reduzir spam no terminal.
+        # Mantemos o debug para inspeção quando o nível DEBUG estiver ativo.
 
         # Verificar se RSI atingiu o gatilho
         if rsi_atual < self.rsi_limite_compra:

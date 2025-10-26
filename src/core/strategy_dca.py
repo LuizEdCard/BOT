@@ -83,6 +83,8 @@ class StrategyDCA:
         self.habilitado: bool = bool(
             self.config.get('ESTRATEGIAS', {}).get('dca', True)
         )
+        # Cache para evitar spam de logs sobre estado habilitado/desabilitado
+        self._ultimo_habilitado_logged: Optional[bool] = None
     
     def verificar_oportunidade(
         self, 
@@ -108,8 +110,14 @@ class StrategyDCA:
         try:
             # Se estratégia DCA estiver desabilitada nas configs, não faz nada
             if not self.habilitado:
-                self.logger.info("ℹ️ Estratégia DCA está desabilitada nas configurações; pulando verificações DCA.")
+                # Logar apenas quando houver mudança de estado para evitar spam
+                if self._ultimo_habilitado_logged is not True:
+                    self.logger.info("ℹ️ Estratégia DCA está desabilitada nas configurações; pulando verificações DCA.")
+                    self._ultimo_habilitado_logged = True
                 return None
+            else:
+                # Resetar cache quando estratégia passa a estar habilitada
+                self._ultimo_habilitado_logged = False
 
             # MODO CRASH: Ignorar todas as restrições
             modo_crash = self.worker.modo_crash_ativo if self.worker else False

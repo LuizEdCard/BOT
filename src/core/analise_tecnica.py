@@ -5,7 +5,8 @@ from decimal import Decimal
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 import pandas as pd
-import pandas_ta as ta
+import numpy as np
+import talib
 
 from src.utils.logger import get_loggers
 
@@ -259,41 +260,38 @@ class AnaliseTecnica:
         }
 
     def get_rsi(self, par, timeframe='4h', periodo=14, limite_candles=100) -> Optional[Decimal]:
-        """Busca o valor do RSI para um par de moedas."""
+        """Busca o valor do RSI para um par de moedas usando TA-Lib."""
         try:
-            # Sanitizar timeframe (pode estar malformado como "30Mh")
+            # Sanitizar timeframe
             timeframe_clean = str(timeframe).lower() if timeframe else '4h'
             if timeframe_clean.endswith('mh'):
-                timeframe_clean = timeframe_clean[:-1]  # Remove 'h' final de "30Mh" → "30m"
+                timeframe_clean = timeframe_clean[:-1]
             elif timeframe_clean.endswith('hh'):
-                timeframe_clean = timeframe_clean[:-1]  # Remove 'h' final de "1hh" → "1h"
+                timeframe_clean = timeframe_clean[:-1]
 
             klines = self.api.obter_klines(par, timeframe_clean, limite_candles)
-            if not klines:
+            
+            # TA-Lib precisa de um número mínimo de pontos de dados
+            if not klines or len(klines) <= periodo:
+                logger.debug(f"Dados insuficientes para calcular RSI de {periodo} períodos (recebido: {len(klines)}).")
                 return None
 
-            # Fix: Handle variable number of columns from different exchanges
-            # Some exchanges return 6 columns, others 7 or more
-            if len(klines[0]) >= 6:
-                # Take only the first 6 columns we need
-                klines_clean = [[k[0], k[1], k[2], k[3], k[4], k[5]] for k in klines]
-                df = pd.DataFrame(klines_clean, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            else:
-                logger.error(f"Insufficient kline data columns: {len(klines[0])} < 6")
-                return None
-                
-            df['close'] = pd.to_numeric(df['close'])
+            # Extrair apenas os preços de fechamento para um array numpy
+            # TA-Lib espera um array de float64
+            close_prices = np.array([float(k[4]) for k in klines])
 
-            rsi = df.ta.rsi(length=periodo)
-            if rsi is None or rsi.empty:
-                return None
+            # Calcular RSI com TA-Lib
+            rsi_values = talib.RSI(close_prices, timeperiod=periodo)
 
-            rsi_value = rsi.iloc[-1]
-            if pd.isna(rsi_value):
-                logger.warning(f"Cálculo de RSI para {par} resultou em NaN (dados insuficientes?).")
+            # O resultado pode ter NaNs no início, pegar o último valor
+            last_rsi = rsi_values[-1]
+
+            # Verificar se o último valor é NaN
+            if np.isnan(last_rsi):
+                logger.warning(f"Cálculo de RSI (TA-Lib) para {par} com timeframe {timeframe_clean} resultou em NaN.")
                 return None
 
-            return Decimal(str(rsi_value))
+            return Decimal(str(last_rsi))
         except Exception as e:
-            logger.error(f"Erro ao calcular RSI para {par}: {e}")
+            logger.error(f"Erro ao calcular RSI com TA-Lib para {par}: {e}", exc_info=True)
             return None

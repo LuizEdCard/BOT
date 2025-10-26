@@ -656,6 +656,19 @@ def calcular_benchmark_buy_hold(dados_csv: str, saldo_inicial: float, taxa_pct: 
     """
     df = pd.read_csv(dados_csv)
     
+    # Se o DataFrame estiver vazio, retornar resultados neutros para evitar exceções
+    if df is None or df.empty:
+        return {
+            'saldo_final': float(Decimal('0')),
+            'lucro_total': float(Decimal('0')),
+            'lucro_percentual': float(Decimal('0')),
+            'preco_inicial': float(Decimal('0')),
+            'preco_final': float(Decimal('0')),
+            'quantidade_ativo': float(Decimal('0')),
+            'taxa_compra': float(Decimal('0')),
+            'taxa_venda': float(Decimal('0'))
+        }
+
     # Compra no início (primeira vela)
     preco_inicial = Decimal(str(df.iloc[0]['close']))
     taxa = Decimal(str(taxa_pct)) / Decimal('100')
@@ -735,9 +748,9 @@ def analisar_saidas_por_motivo(trades: list) -> Dict[str, Any]:
     # Iterar sobre trades em ordem cronológica (FIFO)
     for trade in trades:
         carteira = trade.get('carteira', 'giro_rapido')
-        tipo = trade.get('tipo', '')
+        side = trade.get('side', '')
 
-        if tipo == 'compra':
+        if side == 'BUY':
             # Adicionar à posição aberta
             if carteira not in posicoes_abertas:
                 posicoes_abertas[carteira] = []
@@ -751,7 +764,7 @@ def analisar_saidas_por_motivo(trades: list) -> Dict[str, Any]:
             }
             posicoes_abertas[carteira].append(compra_info)
 
-        elif tipo == 'venda':
+        elif side == 'SELL':
             motivo = trade.get('motivo', '').lower()
 
             # Determinar categoria de saída
@@ -809,10 +822,19 @@ def imprimir_relatorio_final(resultados: Dict[str, Any], benchmark: Dict[str, fl
     print("="*80)
     
     # Informações gerais
-    df = pd.read_csv(dados_csv)
-    data_inicial = df.iloc[0]['timestamp']
-    data_final = df.iloc[-1]['timestamp']
-    total_velas = len(df)
+    try:
+        df = pd.read_csv(dados_csv)
+    except Exception:
+        df = pd.DataFrame()
+
+    if df is None or df.empty:
+        data_inicial = None
+        data_final = None
+        total_velas = 0
+    else:
+        data_inicial = df.iloc[0].get('timestamp', None)
+        data_final = df.iloc[-1].get('timestamp', None)
+        total_velas = len(df)
     
     print(f"\n📅 Período Simulado:")
     print(f"   Início: {data_inicial}")
@@ -821,8 +843,8 @@ def imprimir_relatorio_final(resultados: Dict[str, Any], benchmark: Dict[str, fl
     
     # Resultados da estratégia
     trades = resultados['trades']
-    compras = [t for t in trades if t['tipo'] == 'compra']
-    vendas = [t for t in trades if t['tipo'] == 'venda']
+    compras = [t for t in trades if t['side'] == 'BUY']
+    vendas = [t for t in trades if t['side'] == 'SELL']
     
     saldo_final_usdt = resultados['saldo_final_usdt']
     saldo_final_ativo = resultados['saldo_final_ativo']
@@ -877,11 +899,18 @@ def imprimir_relatorio_final(resultados: Dict[str, Any], benchmark: Dict[str, fl
     
     # Benchmark Buy & Hold
     print(f"\n📊 Benchmark Buy & Hold:")
-    print(f"   Preço inicial: ${benchmark['preco_inicial']:.6f}")
-    print(f"   Preço final: ${benchmark['preco_final']:.6f}")
-    print(f"   Quantidade comprada: {benchmark['quantidade_ativo']:.4f}")
-    print(f"   Saldo final: ${benchmark['saldo_final']:.2f}")
-    print(f"   Lucro/Prejuízo: ${benchmark['lucro_total']:.2f} ({benchmark['lucro_percentual']:+.2f}%)")
+    preco_inicial_bench = benchmark.get('preco_inicial', 0.0)
+    preco_final_bench = benchmark.get('preco_final', 0.0)
+    quantidade_bench = benchmark.get('quantidade_ativo', 0.0)
+    saldo_final_bench = benchmark.get('saldo_final', 0.0)
+    lucro_total_bench = benchmark.get('lucro_total', 0.0)
+    lucro_percentual_bench = benchmark.get('lucro_percentual', 0.0)
+
+    print(f"   Preço inicial: ${preco_inicial_bench:.6f}")
+    print(f"   Preço final: ${preco_final_bench:.6f}")
+    print(f"   Quantidade comprada: {quantidade_bench:.4f}")
+    print(f"   Saldo final: ${saldo_final_bench:.2f}")
+    print(f"   Lucro/Prejuízo: ${lucro_total_bench:.2f} ({lucro_percentual_bench:+.2f}%)")
     
     # Comparação
     print(f"\n🔍 Comparação Estratégia vs Buy & Hold:")
@@ -912,6 +941,7 @@ def main():
     parser.add_argument('--saldo', type=float, help='Saldo inicial em USDT (ex: 1000)')
     parser.add_argument('--taxa', type=float, help='Taxa da exchange em porcentagem (ex: 0.1)')
     parser.add_argument('--estrategias', type=str, help='Estratégias a executar (ex: dca,giro_rapido ou ambas)')
+    parser.add_argument('--save-config', type=str, help='Salvar a configuração final (após prompts/overrides) em PATH antes de rodar')
     args = parser.parse_args()
 
     # Pré-preencher variáveis quando rodando em modo não-interativo
@@ -1091,6 +1121,15 @@ def main():
     if not confirmar:
         print("❌ Backtest cancelado pelo usuário.")
         return
+    # Se solicitado, salvar a configuração final em disco para inspeção/reprodutibilidade
+    if args.save_config:
+        try:
+            caminho_salvar = args.save_config
+            with open(caminho_salvar, 'w', encoding='utf-8') as f_out:
+                json.dump(config, f_out, indent=2, ensure_ascii=False)
+            print(f"💾 Configuração final salva em: {caminho_salvar}")
+        except Exception as e:
+            print(f"⚠️ Falha ao salvar configuração em {args.save_config}: {e}")
     
     # 9. VALIDAÇÃO CRÍTICA: Garantir que alocacao_capital_pct foi aplicada
     print("\n" + "="*80)

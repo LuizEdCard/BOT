@@ -14,7 +14,7 @@ class SimulatedExchangeAPI(ExchangeAPI):
     Herda da ExchangeAPI e simula o comportamento de uma exchange real usando dados históricos de um arquivo CSV.
     """
 
-    def __init__(self, caminho_csv: str, saldo_inicial: float, taxa_pct: float, timeframe_base: str = '1m'):
+    def __init__(self, caminho_csv: str, saldo_inicial: float, taxa_pct: float, timeframe_base: str = '1m', alocacao_giro_pct: Optional[float] = None):
         """
         Inicializa a API de exchange simulada.
 
@@ -43,21 +43,41 @@ class SimulatedExchangeAPI(ExchangeAPI):
         # Saldos globais (mantidos para compatibilidade)
         self.saldo_usdt = Decimal(str(saldo_inicial))
         self.saldo_ativo = Decimal('0')
-
         # Saldos por carteira (para suportar múltiplas estratégias)
+        # Permitir configurar a alocação inicial de giro rápido via parâmetro.
+        if alocacao_giro_pct is None:
+            # fallback legacy: 20% giro / 80% acumulação
+            giro_pct = Decimal('20')
+        else:
+            giro_pct = Decimal(str(alocacao_giro_pct))
+
+        acumulacao_pct = Decimal('100') - giro_pct
+
         self.saldos_por_carteira = {
             'acumulacao': {
-                'saldo_usdt': Decimal(str(saldo_inicial)) * Decimal('0.8'),  # 80% inicial
+                'saldo_usdt': (Decimal(str(saldo_inicial)) * (acumulacao_pct / Decimal('100'))).quantize(Decimal('0.00000001')),
                 'saldo_ativo': Decimal('0')
             },
             'giro_rapido': {
-                'saldo_usdt': Decimal(str(saldo_inicial)) * Decimal('0.2'),  # 20% inicial
+                'saldo_usdt': (Decimal(str(saldo_inicial)) * (giro_pct / Decimal('100'))).quantize(Decimal('0.00000001')),
                 'saldo_ativo': Decimal('0')
             }
         }
 
+        # Guardar alocacao atual para referência
+        self.alocacao_giro_pct = Decimal(str(giro_pct))
+
+        # Histórico do portfólio ao longo do tempo (lista de snapshots)
+        self.portfolio_over_time: List[dict] = []
+
         self.taxa = Decimal(str(taxa_pct)) / Decimal('100')
-        self.indice_atual = 0
+
+        # Inicia com um buffer para garantir histórico para indicadores.
+        # Ajustar para o tamanho dos dados caso o CSV seja curto para evitar iniciar
+        # além do final do DataFrame (o que faria a simulação terminar imediatamente).
+        default_buffer = 200
+        max_valid_index = max(1, len(self.dados) - 1)
+        self.indice_atual = default_buffer if default_buffer < len(self.dados) else max_valid_index
         self.trades_executados = []
 
     def get_barra_atual(self):
@@ -94,9 +114,15 @@ class SimulatedExchangeAPI(ExchangeAPI):
             return pd.DataFrame()
 
         # Se o timeframe pedido for menor que o base, não é possível fazer resample
-        if timeframe_req_td < timeframe_base_td:
-            print(f"❌ Erro de Resample: Timeframe solicitado ({timeframe}) é menor que o timeframe base do CSV ({self.timeframe_base}).")
-            return pd.DataFrame() # Retorna DF vazio
+            # Se o timeframe pedido for menor que o base, não é possível resample para uma resolução
+            # maior (não temos dados intrínsecos mais granulares). Em vez de retornar vazio, cair
+            # para o timeframe base (fallback seguro) e avisar no log. Isso permite que a
+            # simulação continue usando os dados disponíveis no CSV mesmo quando o usuário
+            # solicitou um timeframe mais baixo do que o disponível.
+            if timeframe_req_td < timeframe_base_td:
+                print(f"⚠️ Aviso de Resample: Timeframe solicitado ({timeframe}) é menor que o timeframe base do CSV ({self.timeframe_base}). Usando o timeframe base como fallback.")
+                # Retornar os dados no timeframe base (fallback) em vez de um DataFrame vazio
+                return self.dados_resampled[self.timeframe_base].head(limite).reset_index()
 
         # Se for o mesmo timeframe, apenas retorna os dados originais
         if timeframe_req_td == timeframe_base_td:
@@ -169,11 +195,12 @@ class SimulatedExchangeAPI(ExchangeAPI):
             trade = {
                 'id': str(uuid.uuid4()),
                 'par': par,
-                'tipo': 'compra',
+                'side': 'BUY',
                 'carteira': carteira,
                 'preco': float(preco),
                 'quantidade_usdt': float(custo_total),
                 'quantidade_ativo': float(quantidade_ativo),
+                'fee': float(taxa_incorpora),
                 'timestamp': barra_atual['timestamp'],
                 'motivo': motivo_compra
             }
@@ -244,11 +271,12 @@ class SimulatedExchangeAPI(ExchangeAPI):
             trade = {
                 'id': str(uuid.uuid4()),
                 'par': par,
-                'tipo': 'venda',
+                'side': 'SELL',
                 'carteira': carteira,
                 'preco': float(preco),
                 'quantidade_ativo': float(quantidade_venda),
                 'receita_usdt': float(receita_liquida),
+                'fee': float(taxa_incorpora),
                 'timestamp': barra_atual['timestamp'],
                 'motivo': motivo_saida
             }
@@ -284,11 +312,18 @@ class SimulatedExchangeAPI(ExchangeAPI):
             DataFrame resampleado com colunas OHLCV
         """
         # Converter timeframe para formato do pandas resample
-        # Normalizar para lowercase (pandas aceita '1h', '4h', '1d', '30m', etc.)
+        # Normalizar para lowercase (entrada pode ser '1m','5m','1h', etc.)
         timeframe_pandas = timeframe.lower()
 
-        # Validar formato - deve terminar com m, h, d, ou s
-        if not timeframe_pandas[-1] in ('m', 'h', 'd', 's'):
+        # Pandas mudou algumas aliases (ex: 'm' pode ser interpretado como month-end).
+        # Mapear explicitamente minutos 'm' para 'T' (minute) para evitar confusão
+        # onde 'm' seria tratado como mês. Ex: '5m' -> '5T'
+        if timeframe_pandas.endswith('m'):
+            # evitar interpretar 'm' como mês; usar 'T' para minutos
+            timeframe_pandas = timeframe_pandas[:-1] + 'T'
+
+        # Validar formato - deve terminar com T, h, d, ou s
+        if not timeframe_pandas[-1] in ('T', 'h', 'd', 's'):
             raise ValueError(f"Timeframe inválido: '{timeframe}'. Use: 1m, 5m, 15m, 30m, 1h, 4h, 1d, etc.")
         
         # Resamplear com as agregações corretas
@@ -341,12 +376,28 @@ class SimulatedExchangeAPI(ExchangeAPI):
                 ]
             ]
         """
-        # Verificar se já está no cache
-        if intervalo not in self.dados_resampled:
-            df_resampled = self._resample_dados(intervalo)
-            self.dados_resampled[intervalo] = df_resampled
+        # Verificar se o intervalo solicitado é menor que o timeframe base do CSV.
+        # Nesse caso, não podemos resamplear para uma resolução mais alta — em vez disso,
+        # usar o timeframe base como fallback para evitar retornar DataFrames vazios
+        # e permitir que a simulação continue.
+        try:
+            timeframe_base_td = pd.to_timedelta(self.timeframe_base)
+            timeframe_req_td = pd.to_timedelta(intervalo)
+        except Exception:
+            timeframe_base_td = None
+            timeframe_req_td = None
+
+        if timeframe_req_td is not None and timeframe_base_td is not None and timeframe_req_td < timeframe_base_td:
+            # Fallback para timeframe base
+            logger.debug(f"⚠️ obter_klines: intervalo solicitado ({intervalo}) é menor que o timeframe base ({self.timeframe_base}); usando timeframe base como fallback.")
+            df_resampled = self.dados_resampled[self.timeframe_base]
         else:
-            df_resampled = self.dados_resampled[intervalo]
+            # Verificar se já está no cache
+            if intervalo not in self.dados_resampled:
+                df_resampled = self._resample_dados(intervalo)
+                self.dados_resampled[intervalo] = df_resampled
+            else:
+                df_resampled = self.dados_resampled[intervalo]
 
         # CORREÇÃO CRÍTICA: Obter o timestamp atual da simulação
         # para não retornar dados futuros (lookahead bias)
@@ -356,11 +407,39 @@ class SimulatedExchangeAPI(ExchangeAPI):
             # Se ainda não iniciou a simulação, usar o último timestamp disponível
             timestamp_atual = df_resampled.index[-1]
 
-        # Aplicar filtro de tempo
+        # Aplicar filtro de tempo: queremos as barras RESAMPLEADAS até o timestamp atual
         df_filtrado = df_resampled.copy()
 
         # CRÍTICO: Limitar ao timestamp atual da simulação (evita ver o futuro!)
-        df_filtrado = df_filtrado[df_filtrado.index <= timestamp_atual]
+        # Alguns cenários (timezones, alinhamento de labels) podem produzir DataFrames vazios
+        # ao usar uma máscara booleana direta. Usar searchsorted como fallback para obter
+        # o último índice resampleado <= timestamp_atual.
+        try:
+            # Normalizar tipos (remover tz para evitar comparação inválida)
+            if isinstance(timestamp_atual, pd.Timestamp) and timestamp_atual.tzinfo is not None:
+                timestamp_atual = timestamp_atual.tz_convert(None)
+
+            # Máscara rápida
+            df_filtrado = df_filtrado[df_filtrado.index <= timestamp_atual]
+
+            # Se vazio, usar searchsorted para obter tudo até o último bucket concluído
+            if df_filtrado.empty:
+                pos = df_resampled.index.searchsorted(timestamp_atual, side='right') - 1
+                if pos >= 0:
+                    df_filtrado = df_resampled.iloc[:pos+1]
+                else:
+                    df_filtrado = df_resampled.iloc[0:0]
+        except Exception:
+            # Em caso de qualquer erro de comparação, usar fallback seguro via searchsorted
+            try:
+                pos = df_resampled.index.searchsorted(timestamp_atual, side='right') - 1
+                if pos >= 0:
+                    df_filtrado = df_resampled.iloc[:pos+1]
+                else:
+                    df_filtrado = df_resampled.iloc[0:0]
+            except Exception:
+                # Como último recurso, retornar os últimos 'limite' candles do resample sem filtrar
+                df_filtrado = df_resampled.tail(limite)
 
         # Aplicar filtro de início se fornecido (somente se não limita ao futuro)
         if inicio:
@@ -415,8 +494,70 @@ class SimulatedExchangeAPI(ExchangeAPI):
         return {
             'trades': self.trades_executados,
             'saldo_final_usdt': float(self.saldo_usdt),
-            'saldo_final_ativo': float(self.saldo_ativo)
+            'saldo_final_ativo': float(self.saldo_ativo),
+            'portfolio_over_time': self.portfolio_over_time
         }
+
+    def reconfigurar_alocacao_inicial(self, alocacao_giro_pct: float):
+        """
+        Reconfigura a alocação inicial entre carteiras durante a simulação.
+
+        Ajusta os saldos USDT de 'acumulacao' e 'giro_rapido' com base no
+        percentual fornecido, preservando o saldo total USDT atual e os ativos.
+        """
+        try:
+            novo_giro = Decimal(str(alocacao_giro_pct))
+            if novo_giro < 0 or novo_giro > 100:
+                raise ValueError("alocacao_giro_pct deve estar entre 0 e 100")
+
+            total_usdt = self.saldo_usdt
+            saldo_giro = (total_usdt * (novo_giro / Decimal('100'))).quantize(Decimal('0.00000001'))
+            saldo_acum = (total_usdt - saldo_giro).quantize(Decimal('0.00000001'))
+
+            self.saldos_por_carteira['giro_rapido']['saldo_usdt'] = saldo_giro
+            self.saldos_por_carteira['acumulacao']['saldo_usdt'] = saldo_acum
+            self.alocacao_giro_pct = novo_giro
+
+            logger.info(f"🔧 SimulatedExchangeAPI: alocacao inicial reconfigurada - Giro: {novo_giro}% | Giro_USDT: ${saldo_giro:.4f} | Acum_USDT: ${saldo_acum:.4f}")
+        except Exception as e:
+            logger.error(f"❌ Erro ao reconfigurar alocação inicial: {e}")
+
+    def record_snapshot(self, timestamp: Optional[str] = None):
+        """
+        Registra um snapshot do portfólio no momento atual da simulação.
+
+        O snapshot contém: timestamp, saldo_usdt, saldo_ativo, valor_total_em_quote.
+        """
+        try:
+            # Obter preço atual da simulação (preço do último candle processado)
+            preco = Decimal(str(self.get_preco_atual(self._par_stub() if hasattr(self, '_par_stub') else 'ADA/USDT')))
+
+            # Sumarizar saldos
+            saldo_usdt_total = Decimal('0')
+            saldo_ativo_total = Decimal('0')
+            for carteira, dados in self.saldos_por_carteira.items():
+                saldo_usdt_total += Decimal(str(dados.get('saldo_usdt', 0)))
+                saldo_ativo_total += Decimal(str(dados.get('saldo_ativo', 0)))
+
+            # Valor do ativo convertido para quote
+            valor_ativo_em_quote = saldo_ativo_total * preco
+            total_value_quote = float((saldo_usdt_total + valor_ativo_em_quote))
+
+            snap = {
+                'timestamp': timestamp or (self.dados.iloc[self.indice_atual - 1]['timestamp'] if self.indice_atual > 0 else None),
+                'saldo_usdt': float(saldo_usdt_total),
+                'saldo_ativo': float(saldo_ativo_total),
+                'preco': float(preco),
+                'total_value_quote': total_value_quote
+            }
+
+            self.portfolio_over_time.append(snap)
+        except Exception as e:
+            logger.warning(f"⚠️ Falha ao gravar snapshot do portfólio: {e}")
+
+    def _par_stub(self):
+        """Retorno auxiliar para compatibilidade com get_preco_atual assinatura (ignorado)."""
+        return 'ADA/USDT'
 
     # Métodos abstratos da classe base que não são necessários para a simulação
     def get_preco_atual(self, par: str) -> float:

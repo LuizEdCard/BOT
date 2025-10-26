@@ -43,6 +43,8 @@ class PainelStatus:
         self.historico_precos: Deque[tuple[float, float]] = deque(
             maxlen=100  # timestamp, preco
         )
+        # Cache do último painel renderizado para evitar spam quando nada mudou
+        self._ultimo_snapshot_str: Optional[str] = None
 
     def registrar_preco(self, preco: Decimal):
         """
@@ -148,7 +150,33 @@ class PainelStatus:
                 - quantidade_ada: Decimal (usado se posicoes específicas não fornecidas)
                 - preco_medio: Decimal (usado se posicoes específicas não fornecidas)
         """
-        # Atualizar timestamp
+        # Gerar uma string de snapshot compacta com os campos que importam
+        try:
+            preco_atual = float(dados['preco_atual'])
+            pos_acum_qtd = float(dados.get('posicao_acumulacao', {}).get('quantidade', 0) or 0)
+            pos_giro_qtd = float(dados.get('posicao_giro_rapido', {}).get('quantidade', 0) or 0)
+            lucro_acum = float(dados.get('posicao_acumulacao', {}).get('lucro_percentual', 0) or 0)
+            lucro_giro = float(dados.get('posicao_giro_rapido', {}).get('lucro_percentual', 0) or 0)
+            saldo_usdt = float(dados['saldo_usdt'])
+            estado_bot = dados.get('estado_bot', '')
+        except Exception:
+            # Se falta algum campo, cair para render completo (não bloquear exibicao)
+            preco_atual = 0.0
+            pos_acum_qtd = 0.0
+            pos_giro_qtd = 0.0
+            lucro_acum = 0.0
+            lucro_giro = 0.0
+            saldo_usdt = 0.0
+            estado_bot = ''
+
+        snapshot = f"{preco_atual:.6f}|{pos_acum_qtd:.4f}|{pos_giro_qtd:.4f}|{lucro_acum:.2f}|{lucro_giro:.2f}|{saldo_usdt:.2f}|{estado_bot}"
+
+        # Se painel não mudou desde a última exibição, evitar reimpressão
+        if snapshot == self._ultimo_snapshot_str:
+            return False
+
+        # Atualizar cache e timestamp apenas quando realmente for imprimir
+        self._ultimo_snapshot_str = snapshot
         self.ultima_exibicao = time.time()
         agora = datetime.now().strftime('%H:%M:%S')
         uptime = self.calcular_uptime()

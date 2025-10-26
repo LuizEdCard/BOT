@@ -71,6 +71,10 @@ class GestaoCapital:
         # ✅ Alocação será configurada via configurar_alocacao_giro_rapido()
         # NÃO usar padrão hardcoded aqui - deixar None para detectar se foi configurado
         self.alocacao_giro_rapido_pct = None
+        # Último motivo de bloqueio registrado (para evitar spam de logs)
+        # Guardamos a última mensagem de motivo retornada por pode_comprar e só
+        # logamos novamente se o motivo mudar (ou se a operação for aprovada).
+        self._ultimo_motivo_bloqueio = None
 
     def configurar_alocacao_giro_rapido(self, percentual: Decimal):
         """
@@ -299,7 +303,10 @@ class GestaoCapital:
                 f"Capital insuficiente na carteira '{carteira}': ${capital_disponivel:.2f} < ${valor_operacao:.2f} "
                 f"(Reserva protegida: ${reserva_obrigatoria:.2f})"
             )
-            logger.warning(f"⚠️ {motivo}")
+            # Evitar spam: logar apenas se o motivo mudou desde a última vez
+            if motivo != getattr(self, '_ultimo_motivo_bloqueio', None):
+                logger.warning(f"⚠️ {motivo}")
+                self._ultimo_motivo_bloqueio = motivo
             return False, motivo
 
         # 4. Simular saldo após compra
@@ -313,16 +320,24 @@ class GestaoCapital:
                 f"Operação violaria reserva de 8%: saldo após (${saldo_apos:.2f}) < "
                 f"reserva (${reserva_obrigatoria:.2f})"
             )
-            logger.warning(f"🛡️ {motivo}")
+            # Evitar spam: logar apenas se o motivo mudou desde a última vez
+            if motivo != getattr(self, '_ultimo_motivo_bloqueio', None):
+                logger.warning(f"🛡️ {motivo}")
+                self._ultimo_motivo_bloqueio = motivo
             return False, motivo
 
         # 6. Nunca deixar menos de $5
         if saldo_apos < self.saldo_minimo:
             motivo = f"Saldo ficaria abaixo do mínimo: ${saldo_apos:.2f} < ${self.saldo_minimo:.2f}"
-            logger.warning(f"⚠️ {motivo}")
+            # Evitar spam: logar apenas se o motivo mudou desde a última vez
+            if motivo != getattr(self, '_ultimo_motivo_bloqueio', None):
+                logger.warning(f"⚠️ {motivo}")
+                self._ultimo_motivo_bloqueio = motivo
             return False, motivo
 
         # ✅ APROVADO
+        # Limpar último motivo de bloqueio quando uma operação é aprovada
+        self._ultimo_motivo_bloqueio = None
         logger.debug(f"✅ Operação aprovada ({carteira}): ${valor_operacao:.2f}")
         logger.debug(f"   Saldo após: ${saldo_apos:.2f} (reserva: ${reserva_obrigatoria:.2f})")
 
