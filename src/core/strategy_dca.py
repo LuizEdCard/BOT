@@ -181,6 +181,12 @@ class StrategyDCA:
             # Verificar se há capital suficiente
             quantidade_ada = Decimal(str(degrau_ativo['quantidade_ada']))
             valor_ordem = quantidade_ada * preco_atual
+
+            # ✅ CORREÇÃO: Verificar se o valor da ordem atinge o mínimo da exchange
+            valor_minimo_ordem = Decimal(str(self.config.get('VALOR_MINIMO_ORDEM', 5.0)))
+            if valor_ordem < valor_minimo_ordem:
+                self.logger.debug(f"💰 Valor da ordem ${valor_ordem:.2f} abaixo do mínimo de ${valor_minimo_ordem:.2f} para o degrau {degrau_ativo['nivel']}. Ignorando.")
+                return None
             
             # IMPORTANTE: Passar 'acumulacao' explicitamente para validar capital da carteira correta
             pode_comprar_capital, motivo = self.gestao_capital.pode_comprar(valor_ordem, carteira='acumulacao')
