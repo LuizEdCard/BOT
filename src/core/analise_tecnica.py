@@ -288,7 +288,12 @@ class AnaliseTecnica:
             if rsi is None or rsi.empty:
                 return None
 
-            return Decimal(str(rsi.iloc[-1]))
+            rsi_value = rsi.iloc[-1]
+            if pd.isna(rsi_value):
+                logger.warning(f"Cálculo de RSI para {par} resultou em NaN (dados insuficientes?).")
+                return None
+
+            return Decimal(str(rsi_value))
         except Exception as e:
             logger.error(f"Erro ao calcular RSI para {par}: {e}")
             return None
